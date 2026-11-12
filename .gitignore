@@ -1,0 +1,26 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Generated figures and run outputs
+outputs/
+
+# Testing caches
+.pytest_cache/
+
+# IDE and editor settings
+.spyderproject/
+.spyproject/
+.vscode/
+.idea/
+*.swp
+*~
+
+# Operating system files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Large reference documents (uncomment if your team prefers not to track PDFs in git)
+# References/*.pdf
