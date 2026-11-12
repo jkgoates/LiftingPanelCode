@@ -1,0 +1,16 @@
+{
+    "mesh": {
+        "filename": "meshes/wing.stl",
+        "S_ref": 1.0,
+        "c_ref": 1.0
+    },
+    "flow": {
+        "V_inf": [1.0, 0.0, 0.0]
+    },
+    "output": {
+        "report_file": "output/report.json",
+        "body_file": "output/body.vtk",
+        "wake_file": "output/wake.vtk",
+        "off_body_velocity_points": "off_body_velocity_points.csv"
+    }
+}
