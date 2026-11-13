@@ -22,5 +22,5 @@ Thumbs.db
 Desktop.ini
 .DS_Store
 
-# Large reference documents (uncomment if your team prefers not to track PDFs in git)
+# Large reference documents (uncomment if we prefer not to track PDFs in git)
 # References/*.pdf
