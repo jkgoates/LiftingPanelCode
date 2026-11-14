@@ -18,16 +18,18 @@ def main():
         input_data = json.load(f)
 
     # Load mesh from input file
-    mesh = Mesh(input_data["mesh_file"])
+    mesh = Mesh(input_data["mesh"]["filename"])
     print("Mesh loaded with {0} panels and {1} vertices.".format(mesh.N, mesh.vertices.shape[0]))
 
+    flow_direction = input_data["flow"]["V_inf"]
+
     # Find kutta edges
-    kutta_edges = mesh.find_kutta_edges()
+    kutta_edges = mesh.find_kutta_edges(flow_direction)
     print("Found {0} kutta edges.".format(len(kutta_edges)))
 
     # Initialize wake
-    wake = mesh.initialize_wake(kutta_edges)
-    print("Wake initialized with {0} vortex filaments.".format(len(wake)))
+    wake = mesh.initialize_wake(kutta_edges, flow_direction)
+    print("Wake initialized with {0} horseshoe vortices.".format(len(wake)))
 
     # Initialize solver
     mySolver = Solver(mesh, wake)
