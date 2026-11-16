@@ -1,6 +1,6 @@
 {
     "mesh": {
-        "filename": "meshes/wing.stl",
+        "filename": "meshes/wing_RA10_coarse.stl",
         "S_ref": 1.0,
         "c_ref": 1.0
     },

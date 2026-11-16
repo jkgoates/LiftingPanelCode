@@ -21,11 +21,14 @@ class Panel:
         return n, dA, cp
 
     def get_normal(self):
-        n = cross(self.v1 - self.v0, self.v2 - self.v0)
-        return n
+        n = np.asarray(cross(self.v1 - self.v0, self.v2 - self.v0))
+        magnitude = norm(n)
+        if magnitude == 0.0:
+            raise ValueError("Cannot calculate a normal for a zero-area panel")
+        return n / magnitude
 
     def get_area(self):
-        n = self.get_normal()
+        n = cross(self.v1 - self.v0, self.v2 - self.v0)
         dA = 0.5 * norm(n)
         return dA
 
@@ -41,6 +44,13 @@ class Tri(Panel):
         self.v2 = v2
         self.N = 3
         self.vertices = [v0, v1, v2]
+
+
+class Horseshoe:
+    def __init__(self, v0, v1, direction):
+        self.v0 = v0
+        self.v1 = v1
+        self.direction = direction
 
 
 
