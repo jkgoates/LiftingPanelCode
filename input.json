@@ -7,10 +7,26 @@
     "flow": {
         "V_inf": [1.0, 0.0, 0.0]
     },
+    "off_body_grid": {
+        "x_min": -4.0, "x_max": 12.0, "n_x": 17,
+        "y_min": -18.0, "y_max": 18.0, "n_y": 7,
+        "z_min": -3.0, "z_max": 3.0, "n_z": 9
+    },
+    "convergence": {
+        "mesh_files": [
+            "meshes/wing_RA10_coarse.stl",
+            "meshes/wing_RA10_medium.stl"
+        ]
+    },
     "output": {
         "report_file": "output/report.json",
         "body_file": "output/body.vtk",
         "wake_file": "output/wake.vtk",
-        "off_body_velocity_points": "off_body_velocity_points.csv"
+        "wake_length_shown": 5.0,
+        "off_body_file": "output/off_body.vtk",
+        "off_body_velocity_points": "off_body_velocity_points.csv",
+        "off_body_velocity_file": "output/off_body_velocity.csv",
+        "convergence_file": "output/convergence.csv",
+        "convergence_figure": "output/convergence.png"
     }
 }
