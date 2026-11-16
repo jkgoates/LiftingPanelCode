@@ -1041,7 +1041,7 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
     if verbose:
         print("=" * 80)
         print("  MAE 6500: 3D LIFTING VORTEX CODE WITH TRAILING VORTICES")
-        print("  System Setup and Solve Module (Mason Anderson)")
+        print("  System Setup and Solve Module")
         print("=" * 80)
 
     # 1. Panel Geometry (S1)
