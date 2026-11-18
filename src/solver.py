@@ -545,9 +545,92 @@ def find_trailing_edge_segments(vertices, faces, centroids, normals,
 # S6. INFLUENCE COEFFICIENT MATRIX ASSEMBLY
 # =============================================================================
 
+def _extract_ring_edges(vertices, faces):
+    """Build flat directed-edge arrays (P1, P2, edge_panel_idx) for all surface panels."""
+    if isinstance(faces, np.ndarray) and faces.ndim == 2:
+        m, k_sides = faces.shape
+        p_verts = vertices[faces]  # (m, k, 3)
+        P1 = p_verts.reshape(-1, 3)
+        P2 = np.roll(p_verts, -1, axis=1).reshape(-1, 3)
+        return P1, P2, None, m, k_sides
+
+    p1_list, p2_list, panel_idx_list = [], [], []
+    for j, face in enumerate(faces):
+        idx = np.asarray(face, dtype=int)
+        pts = vertices[idx]
+        p1_list.append(pts)
+        p2_list.append(np.roll(pts, -1, axis=0))
+        panel_idx_list.append(np.full(len(idx), j, dtype=int))
+    P1 = np.vstack(p1_list)
+    P2 = np.vstack(p2_list)
+    edge_panel = np.concatenate(panel_idx_list)
+    return P1, P2, edge_panel, len(faces), None
+
+
+def _horseshoe_influence_batch(eval_pts, te_segments, u_inf, core_radius=1e-8):
+    """Vectorized semi-infinite horseshoe influence (Hunsaker Eq. 10) at eval_pts (B, 3).
+    Returns W of shape (B, p, 3).
+    """
+    b_len = len(eval_pts)
+    p = len(te_segments)
+    if p == 0:
+        return np.zeros((b_len, 0, 3), dtype=float)
+
+    P1 = np.array([te['p1'] for te in te_segments], dtype=float)  # (p, 3)
+    P2 = np.array([te['p2'] for te in te_segments], dtype=float)  # (p, 3)
+    u = np.asarray(u_inf, dtype=float)
+    u_norm = np.linalg.norm(u)
+    if u_norm > 1e-14:
+        u = u / u_norm
+
+    dx1 = eval_pts[:, 0:1] - P1[:, 0]
+    dy1 = eval_pts[:, 1:2] - P1[:, 1]
+    dz1 = eval_pts[:, 2:3] - P1[:, 2]
+    dx2 = eval_pts[:, 0:1] - P2[:, 0]
+    dy2 = eval_pts[:, 1:2] - P2[:, 1]
+    dz2 = eval_pts[:, 2:3] - P2[:, 2]
+
+    cr2 = core_radius * core_radius
+    r1 = np.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1 + cr2)
+    r2 = np.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2 + cr2)
+
+    # 1. Trailing leg 1: -(u x r1) / (4 pi r1 (r1 - u . r1))
+    u_dot_r1 = u[0] * dx1 + u[1] * dy1 + u[2] * dz1
+    den1 = 4.0 * math.pi * r1 * (r1 - u_dot_r1)
+    ok1 = np.abs(den1) > 1e-12
+    f1 = np.zeros_like(den1)
+    f1[ok1] = -1.0 / den1[ok1]
+    wx = f1 * (u[1] * dz1 - u[2] * dy1)
+    wy = f1 * (u[2] * dx1 - u[0] * dz1)
+    wz = f1 * (u[0] * dy1 - u[1] * dx1)
+
+    # 2. Bound segment: (r1 + r2)(r1 x r2) / (4 pi r1 r2 (r1 r2 + r1 . r2))
+    dot12 = dx1 * dx2 + dy1 * dy2 + dz1 * dz2
+    denb = 4.0 * math.pi * r1 * r2 * (r1 * r2 + dot12)
+    okb = np.abs(denb) > 1e-12
+    fb = np.zeros_like(denb)
+    fb[okb] = (r1[okb] + r2[okb]) / denb[okb]
+    wx += fb * (dy1 * dz2 - dz1 * dy2)
+    wy += fb * (dz1 * dx2 - dx1 * dz2)
+    wz += fb * (dx1 * dy2 - dy1 * dx2)
+
+    # 3. Trailing leg 2: +(u x r2) / (4 pi r2 (r2 - u . r2))
+    u_dot_r2 = u[0] * dx2 + u[1] * dy2 + u[2] * dz2
+    den2 = 4.0 * math.pi * r2 * (r2 - u_dot_r2)
+    ok2 = np.abs(den2) > 1e-12
+    f2 = np.zeros_like(den2)
+    f2[ok2] = 1.0 / den2[ok2]
+    wx += f2 * (u[1] * dz2 - u[2] * dy2)
+    wy += f2 * (u[2] * dx2 - u[0] * dz2)
+    wz += f2 * (u[0] * dy2 - u[1] * dx2)
+
+    return np.stack([wx, wy, wz], axis=-1)
+
+
 def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
-                           u_inf, pin_panel_idx=0, core_radius=1e-8):
-    """Assemble the aerodynamic influence coefficient matrix [A] and velocity tensor.
+                           u_inf, pin_panel_idx=0, core_radius=1e-8,
+                           compute_v_tensor=None, chunk_size=128):
+    """Assemble the aerodynamic influence coefficient matrix [A] (vectorized, chunked).
     (Hunsaker Sandia Report Eqs. 4 - 14; Katz & Plotkin Eqs. 12.8, 12.28)
 
     Structure of System Matrix [A] (size (m + p + 1) x (m + p)):
@@ -565,18 +648,20 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
             (Hunsaker Eq. 14 for lifting bodies with trailing vortices)
 
     Parameters:
-        vertices:      (n_v, 3) ndarray of mesh vertices
-        faces:         (n_f, 3) ndarray of face vertex indices
-        centroids:     (n_f, 3) ndarray of panel centroids (control points)
-        normals:       (n_f, 3) ndarray of outward unit normals
-        te_segments:   list of trailing edge segment dictionaries
-        u_inf:         (3,) ndarray, freestream unit direction vector
-        pin_panel_idx: int, index of panel pinned to zero circulation (default: 0)
-        core_radius:   float, vortex core cutoff radius
+        vertices:         (n_v, 3) ndarray of mesh vertices
+        faces:            (n_f, 3)/(n_f, 4) ndarray or list of vertex index arrays
+        centroids:        (n_f, 3) ndarray of panel centroids (control points)
+        normals:          (n_f, 3) ndarray of outward unit normals
+        te_segments:      list of trailing edge segment dictionaries
+        u_inf:            (3,) ndarray, freestream unit direction vector
+        pin_panel_idx:    int, index of panel pinned to zero circulation (default: 0)
+        core_radius:      float, vortex core cutoff radius
+        compute_v_tensor: bool or None (if None, computed only when m <= 1500 to save RAM)
+        chunk_size:       int, row batch size for vectorized Biot-Savart evaluation
 
     Returns:
         A:        ((m + p + 1), (m + p)) ndarray, full influence matrix
-        V_tensor: (m, (m + p), 3) ndarray, 3D induced velocity tensor at centroids
+        V_tensor: (m, (m + p), 3) ndarray or None (when m > 1500 to avoid GB allocation)
     """
     m = len(faces)
     p = len(te_segments)
@@ -584,48 +669,68 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
     n_eqs = m + p + 1
 
     A = np.zeros((n_eqs, n_vars), dtype=float)
-    V_tensor = np.zeros((m, n_vars, 3), dtype=float)
+    if compute_v_tensor is None:
+        compute_v_tensor = (m <= 1500)
+    V_tensor = np.zeros((m, n_vars, 3), dtype=float) if compute_v_tensor else None
 
-    is_uniform_tris = (
-        isinstance(faces, np.ndarray) and faces.ndim == 2 and faces.shape[1] == 3
-    )
-    if is_uniform_tris:
-        # Pre-extract triangle vertices for fast inner loop
-        f_v0 = vertices[faces[:, 0]]
-        f_v1 = vertices[faces[:, 1]]
-        f_v2 = vertices[faces[:, 2]]
+    P1, P2, edge_panel, _, k_sides = _extract_ring_edges(vertices, faces)
+    cr2 = core_radius * core_radius
 
     # 1. Flow tangency boundary condition: Rows 0 to m-1 (Hunsaker Eq. 4)
-    for i in range(m):
-        c_i = centroids[i]
-        n_i = normals[i]
+    for i0 in range(0, m, chunk_size):
+        i1 = min(i0 + chunk_size, m)
+        b_len = i1 - i0
+        ci = centroids[i0:i1]
+        ni = normals[i0:i1]
 
-        # Influence of bound surface vortex rings j = 0 .. m-1 (Hunsaker Eq. 8)
-        for j in range(m):
-            # if i == j:
-            #     # Self-influence of a flat planar polygon ring on its own centroid is zero
-            #     continue
-            if is_uniform_tris:
-                v_ring = (
-                    biot_savart_segment(f_v0[j], f_v1[j], c_i, core_radius=core_radius) +
-                    biot_savart_segment(f_v1[j], f_v2[j], c_i, core_radius=core_radius) +
-                    biot_savart_segment(f_v2[j], f_v0[j], c_i, core_radius=core_radius)
-                )
-            else:
-                v_ring = vortex_ring_velocity(
-                    vertices[np.asarray(faces[j], dtype=int)],
-                    c_i,
-                    core_radius=core_radius,
-                )
-            V_tensor[i, j, :] = v_ring
-            A[i, j] = np.dot(v_ring, n_i)
+        dx1 = ci[:, 0:1] - P1[:, 0]
+        dy1 = ci[:, 1:2] - P1[:, 1]
+        dz1 = ci[:, 2:3] - P1[:, 2]
+        dx2 = ci[:, 0:1] - P2[:, 0]
+        dy2 = ci[:, 1:2] - P2[:, 1]
+        dz2 = ci[:, 2:3] - P2[:, 2]
 
-        # Influence of trailing wake horseshoe vortices l = 0 .. p-1 (Hunsaker Eq. 10)
-        for l in range(p):
-            te = te_segments[l]
-            w_wake = trailing_horseshoe_velocity(te['p1'], te['p2'], u_inf, c_i, core_radius=core_radius)
-            V_tensor[i, m + l, :] = w_wake
-            A[i, m + l] = np.dot(w_wake, n_i)
+        r1 = np.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1 + cr2)
+        r2 = np.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2 + cr2)
+
+        cx = dy1 * dz2 - dz1 * dy2
+        cy = dz1 * dx2 - dx1 * dz2
+        cz = dx1 * dy2 - dy1 * dx2
+        dot12 = dx1 * dx2 + dy1 * dy2 + dz1 * dz2
+        den = 4.0 * math.pi * r1 * r2 * (r1 * r2 + dot12)
+
+        ok = np.abs(den) > 1e-12
+        fac = np.zeros_like(den)
+        fac[ok] = (r1[ok] + r2[ok]) / den[ok]
+
+        ex = fac * cx
+        ey = fac * cy
+        ez = fac * cz
+
+        if k_sides is not None:
+            vx = ex.reshape(b_len, m, k_sides).sum(axis=2)
+            vy = ey.reshape(b_len, m, k_sides).sum(axis=2)
+            vz = ez.reshape(b_len, m, k_sides).sum(axis=2)
+        else:
+            vx = np.zeros((b_len, m), dtype=float)
+            vy = np.zeros((b_len, m), dtype=float)
+            vz = np.zeros((b_len, m), dtype=float)
+            for row in range(b_len):
+                vx[row] = np.bincount(edge_panel, weights=ex[row], minlength=m)
+                vy[row] = np.bincount(edge_panel, weights=ey[row], minlength=m)
+                vz[row] = np.bincount(edge_panel, weights=ez[row], minlength=m)
+
+        A[i0:i1, :m] = vx * ni[:, 0:1] + vy * ni[:, 1:2] + vz * ni[:, 2:3]
+        if V_tensor is not None:
+            V_tensor[i0:i1, :m, 0] = vx
+            V_tensor[i0:i1, :m, 1] = vy
+            V_tensor[i0:i1, :m, 2] = vz
+
+        if p > 0:
+            W = _horseshoe_influence_batch(ci, te_segments, u_inf, core_radius=core_radius)
+            A[i0:i1, m:] = np.einsum('blj,bj->bl', W, ni)
+            if V_tensor is not None:
+                V_tensor[i0:i1, m:, :] = W
 
     # 2. Kutta condition: Rows m to m+p-1 (Hunsaker Eq. 12)
     for l in range(p):
@@ -677,21 +782,122 @@ def build_rhs_vector(normals, V_inf_vec, n_te_segments):
 # S8. CIRCULATION SYSTEM LEAST-SQUARES SOLVE
 # =============================================================================
 
-def solve_circulation_system(A, b):
-    """Solve the overdetermined linear system [A]{Gamma} = {b} via least squares.
+def _gmres_normal(A, b, tol=1e-8, restart=80, maxiter=800):
+    """Pure-NumPy Jacobi-preconditioned restarted GMRES on the normal equations
+    [A^T A]{x} = [A^T]{b} (matrix-free matvec A^T(A v) avoids forming A^T A).
+    """
+    ATb = A.T @ b
+    n = A.shape[1]
+    col_norm_sq = np.sum(A * A, axis=0)
+    col_norm_sq[col_norm_sq < 1e-14] = 1.0
+    M_inv = 1.0 / col_norm_sq
+
+    x = np.zeros(n, dtype=float)
+    b_norm = float(np.linalg.norm(M_inv * ATb))
+    if b_norm == 0.0:
+        return x
+
+    def matvec(v):
+        return M_inv * (A.T @ (A @ v))
+
+    rhs = M_inv * ATb
+    n_restarts = max(1, maxiter // restart)
+    for _ in range(n_restarts):
+        r = rhs - matvec(x)
+        beta = float(np.linalg.norm(r))
+        if beta / b_norm < tol:
+            break
+
+        V = np.zeros((restart + 1, n), dtype=float)
+        H = np.zeros((restart + 1, restart), dtype=float)
+        V[0] = r / beta
+        g = np.zeros(restart + 1, dtype=float)
+        g[0] = beta
+        cs = np.zeros(restart, dtype=float)
+        sn = np.zeros(restart, dtype=float)
+        k_end = restart
+
+        for j in range(restart):
+            w = matvec(V[j])
+            for i in range(j + 1):
+                h_ij = float(np.dot(w, V[i]))
+                H[i, j] = h_ij
+                w -= h_ij * V[i]
+            h_next = float(np.linalg.norm(w))
+            H[j + 1, j] = h_next
+            if h_next > 1e-14:
+                V[j + 1] = w / h_next
+
+            for i in range(j):
+                tmp = cs[i] * H[i, j] + sn[i] * H[i + 1, j]
+                H[i + 1, j] = -sn[i] * H[i, j] + cs[i] * H[i + 1, j]
+                H[i, j] = tmp
+
+            denom = math.hypot(H[j, j], H[j + 1, j])
+            if denom > 1e-16:
+                cs[j] = H[j, j] / denom
+                sn[j] = H[j + 1, j] / denom
+            else:
+                cs[j], sn[j] = 1.0, 0.0
+            H[j, j] = cs[j] * H[j, j] + sn[j] * H[j + 1, j]
+            H[j + 1, j] = 0.0
+
+            tmp = cs[j] * g[j]
+            g[j + 1] = -sn[j] * g[j]
+            g[j] = tmp
+
+            if abs(g[j + 1]) / b_norm < tol:
+                k_end = j + 1
+                break
+
+        y = np.linalg.solve(H[:k_end, :k_end], g[:k_end])
+        x += y @ V[:k_end]
+        if abs(g[k_end]) / b_norm < tol:
+            break
+
+    return x
+
+
+def solve_circulation_system(A, b, method="auto", tol=1e-8, maxiter=800, restart=80):
+    """Solve the overdetermined linear system [A]{Gamma} = {b}.
     (Hunsaker Sandia Report Eq. 14; Katz & Plotkin §12.3)
 
-    Because pinning one panel circulation makes the system (m + p + 1) x (m + p),
-    solving via least squares guarantees a robust, minimal-residual solution.
+    Methods:
+        - 'lstsq':  Full SVD least squares (np.linalg.lstsq).
+        - 'normal': Normal equations [A^T A]{Gamma} = [A^T]{b} via BLAS/LAPACK.
+        - 'gmres':  Matrix-free Jacobi-preconditioned restarted GMRES on normal equations.
+        - 'auto':   Uses 'lstsq' for n_vars <= 1000 and 'normal' for n_vars > 1000
+                    (falling back to 'lstsq' if ill-conditioned).
 
     Parameters:
-        A: ((m + p + 1), (m + p)) ndarray, influence matrix
-        b: (m + p + 1,) ndarray, right-hand side vector
+        A:       ((m + p + 1), (m + p)) ndarray, influence matrix
+        b:       (m + p + 1,) ndarray, right-hand side vector
+        method:  str, 'auto', 'lstsq', 'normal', or 'gmres'
+        tol:     float, relative residual tolerance for GMRES
+        maxiter: int, max GMRES iterations
+        restart: int, GMRES Krylov subspace restart size
 
     Returns:
         gamma_total: (m + p,) ndarray, solved circulation values
         residuals:   float or ndarray, sum of squared residuals
     """
+    n_vars = A.shape[1]
+    if method == "gmres":
+        gamma_total = _gmres_normal(A, b, tol=tol, restart=restart, maxiter=maxiter)
+        res = A @ gamma_total - b
+        return gamma_total, np.array([float(np.dot(res, res))])
+
+    if method == "normal" or (method == "auto" and n_vars > 1000):
+        try:
+            ATA = A.T @ A
+            ATb = A.T @ b
+            gamma_total = np.linalg.solve(ATA, ATb)
+            res = A @ gamma_total - b
+            residuals = np.array([float(np.dot(res, res))])
+            return gamma_total, residuals
+        except np.linalg.LinAlgError:
+            pass
+
     gamma_total, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
     return gamma_total, residuals
 
@@ -702,7 +908,7 @@ def solve_circulation_system(A, b):
 
 def compute_centroid_velocities(vertices, faces, centroids, te_segments,
                                 gamma_panels, gamma_wake, V_inf_vec,
-                                V_tensor=None, core_radius=1e-8):
+                                V_tensor=None, core_radius=1e-8, chunk_size=128):
     """Compute the total velocity at each panel centroid (control point).
     (Hunsaker Sandia Report Eqs. 15 & 16; Katz & Plotkin Eq. 12.9)
 
@@ -710,11 +916,12 @@ def compute_centroid_velocities(vertices, faces, centroids, te_segments,
         V_i = V_inf + sum_{j=1}^m Gamma_j * v_ij + sum_{l=1}^p Gamma_{w,l} * w_il
 
     If V_tensor was precomputed during influence matrix assembly (S6), this computes
-    the velocity field instantly via tensor contraction: V_i = V_inf + V_tensor @ Gamma.
+    the velocity field via tensor contraction; otherwise it evaluates the chunked
+    vectorized Biot-Savart sum directly without allocating an (m, m, 3) tensor.
 
     Parameters:
         vertices:     (n_v, 3) ndarray of mesh vertices
-        faces:        (m, 3) ndarray of panel vertex indices
+        faces:        (m, 3)/(m, 4) ndarray or list of panel vertex indices
         centroids:    (m, 3) ndarray of panel centroids
         te_segments:  list of trailing edge segment dictionaries
         gamma_panels: (m,) ndarray of panel circulations
@@ -722,6 +929,7 @@ def compute_centroid_velocities(vertices, faces, centroids, te_segments,
         V_inf_vec:    (3,) ndarray of freestream velocity
         V_tensor:     (m, (m + p), 3) optional precomputed influence tensor
         core_radius:  float, vortex core cutoff radius
+        chunk_size:   int, batch size for vectorized evaluation when V_tensor is None
 
     Returns:
         V_centroids: (m, 3) ndarray of velocity vectors at panel centroids
@@ -736,19 +944,46 @@ def compute_centroid_velocities(vertices, faces, centroids, te_segments,
         return V_inf_vec + V_ind
 
     V_centroids = np.tile(V_inf_vec, (m, 1))
-    for i in range(m):
-        c_i = centroids[i]
-        for j in range(m):
-            if i != j and abs(gamma_panels[j]) > 1e-14:
-                v_ij = vortex_ring_velocity(vertices[faces[j]], c_i, core_radius=core_radius)
-                V_centroids[i] += gamma_panels[j] * v_ij
+    P1, P2, edge_panel, _, k_sides = _extract_ring_edges(vertices, faces)
+    if k_sides is not None:
+        edge_gamma = np.repeat(gamma_panels, k_sides)
+    else:
+        edge_gamma = gamma_panels[edge_panel]
 
-        u_inf = V_inf_vec / np.linalg.norm(V_inf_vec)
-        for l in range(p):
-            if abs(gamma_wake[l]) > 1e-14:
-                te = te_segments[l]
-                w_il = trailing_horseshoe_velocity(te['p1'], te['p2'], u_inf, c_i, core_radius=core_radius)
-                V_centroids[i] += gamma_wake[l] * w_il
+    u_inf = V_inf_vec / np.linalg.norm(V_inf_vec)
+    cr2 = core_radius * core_radius
+
+    for i0 in range(0, m, chunk_size):
+        i1 = min(i0 + chunk_size, m)
+        ci = centroids[i0:i1]
+
+        dx1 = ci[:, 0:1] - P1[:, 0]
+        dy1 = ci[:, 1:2] - P1[:, 1]
+        dz1 = ci[:, 2:3] - P1[:, 2]
+        dx2 = ci[:, 0:1] - P2[:, 0]
+        dy2 = ci[:, 1:2] - P2[:, 1]
+        dz2 = ci[:, 2:3] - P2[:, 2]
+
+        r1 = np.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1 + cr2)
+        r2 = np.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2 + cr2)
+
+        cx = dy1 * dz2 - dz1 * dy2
+        cy = dz1 * dx2 - dx1 * dz2
+        cz = dx1 * dy2 - dy1 * dx2
+        dot12 = dx1 * dx2 + dy1 * dy2 + dz1 * dz2
+        den = 4.0 * math.pi * r1 * r2 * (r1 * r2 + dot12)
+
+        ok = np.abs(den) > 1e-12
+        fac = np.zeros_like(den)
+        fac[ok] = (r1[ok] + r2[ok]) / den[ok]
+
+        V_centroids[i0:i1, 0] += (fac * cx) @ edge_gamma
+        V_centroids[i0:i1, 1] += (fac * cy) @ edge_gamma
+        V_centroids[i0:i1, 2] += (fac * cz) @ edge_gamma
+
+        if p > 0:
+            W = _horseshoe_influence_batch(ci, te_segments, u_inf, core_radius=core_radius)
+            V_centroids[i0:i1] += np.einsum('blj,l->bj', W, gamma_wake)
 
     return V_centroids
 
@@ -758,35 +993,53 @@ def compute_centroid_velocities(vertices, faces, centroids, te_segments,
 # =============================================================================
 
 def compute_surface_velocity_jump(centroids, normals, gamma_panels, V_centroids,
-                                  n_neighbors=6):
+                                  n_neighbors=12, faces=None, te_segments=None,
+                                  min_normal_dot=0.80):
     """Compute physical surface velocities incorporating the discontinuous
     tangential velocity jump across the surface vortex sheet.
-    (Hunsaker Sandia Report Appendix C, Eqs. C.1 - C.8; Katz & Plotkin §12.3)
+    (Hunsaker Sandia Report Eq. 16 & Appendix C, Eqs. C.1 - C.8; Katz & Plotkin §12.3)
 
     Theoretical Context:
         Biot-Savart evaluation directly on the boundary only computes the mean
-        (principal value) velocity across the vortex sheet. The physical outer
-        surface tangential velocity requires adding the half-sheet discontinuity:
-            V_surf,i = V_centroid,i + 0.5 * grad_s(Gamma_i)
+        (principal value) velocity across the vortex sheet. For outward unit
+        normals, the physical outer-surface velocity (Hunsaker Eq. 16, V1) is:
+            V_surf,i = V_t,i - 0.5 * (grad_s(Gamma_i) . v_hat_t,i) * v_hat_t,i
 
-        where the surface gradient grad_s(Gamma_i) is computed via a local
-        least-squares fit over neighboring panel centroids:
-            min sum_{j in N_i} [ (Gamma_j - Gamma_i) - grad_s(Gamma_i) . (r_j - r_i) ]^2
-            subject to: grad_s(Gamma_i) . n_i = 0  (tangent to panel plane)
-        (Hunsaker Eqs. C.1 - C.6)
+        where grad_s(Gamma_i) is fitted via inverse-distance-weighted regularized
+        least squares in panel i's local tangent plane over same-side neighbors
+        (excluding sharp-edge neighbors with dot(n_i, n_j) < min_normal_dot and
+        Kutta TE pairs per Appendix C p. C-2).
 
     Parameters:
-        centroids:    (m, 3) ndarray of panel centroids
-        normals:      (m, 3) ndarray of panel outward normals
-        gamma_panels: (m,) ndarray of panel circulations
-        V_centroids:  (m, 3) ndarray of average centroid velocities
-        n_neighbors:  int, number of neighboring panels used for local gradient fit
+        centroids:      (m, 3) ndarray of panel centroids
+        normals:        (m, 3) ndarray of panel outward normals
+        gamma_panels:   (m,) ndarray of panel circulations
+        V_centroids:    (m, 3) ndarray of average centroid velocities
+        n_neighbors:    int, target neighbor count for local gradient stencil (default: 12)
+        faces:          optional face connectivity for topological Appendix C neighbors
+        te_segments:    optional trailing-edge segment list to exclude Kutta pairs
+        min_normal_dot: float, minimum normal dot product to include neighbor (default: 0.80)
 
     Returns:
         V_surf: (m, 3) ndarray of true physical surface velocity vectors
     """
     m = len(centroids)
     V_surf = np.zeros_like(V_centroids)
+
+    vert_to_panels = None
+    if faces is not None:
+        vert_to_panels = {}
+        for fi, face in enumerate(faces):
+            for vi in face:
+                vert_to_panels.setdefault(int(vi), set()).add(fi)
+
+    te_pairs = set()
+    if te_segments is not None:
+        for te in te_segments:
+            u_p = int(te['upper_panel'])
+            l_p = int(te['lower_panel'])
+            te_pairs.add((u_p, l_p))
+            te_pairs.add((l_p, u_p))
 
     for i in range(m):
         r_i = centroids[i]
@@ -799,24 +1052,40 @@ def compute_surface_velocity_jump(centroids, normals, gamma_panels, V_centroids,
         t1 /= np.linalg.norm(t1)
         t2 = np.cross(n_i, t1)
 
-        # Exclude opposite-facing / sharp-edge neighbors (e.g., upper vs lower TE panels, App. C p. C-2)
-        same_side = np.dot(normals, n_i) >= 0.5
-        same_side[i] = False
-        valid_idx = np.flatnonzero(same_side)
+        nearest = np.array([], dtype=int)
+        if vert_to_panels is not None:
+            nbrs = set()
+            for vi in faces[i]:
+                nbrs |= vert_to_panels[int(vi)]
+            nbrs.discard(i)
+            topo_valid = [
+                j for j in nbrs
+                if np.dot(n_i, normals[j]) >= min_normal_dot and (i, j) not in te_pairs
+            ]
+            if len(topo_valid) >= 4:
+                nearest = np.array(topo_valid, dtype=int)
+
+        # Fallback / expand to same-side nearest neighbors if 1-ring has < 4 smooth panels
+        if len(nearest) < 4:
+            same_side = np.dot(normals, n_i) >= min_normal_dot
+            same_side[i] = False
+            for j_te in (p_idx for (p0, p_idx) in te_pairs if p0 == i):
+                same_side[j_te] = False
+            valid_idx = np.flatnonzero(same_side)
+            if len(valid_idx) >= 2:
+                dists = np.linalg.norm(centroids[valid_idx] - r_i, axis=1)
+                nearest = valid_idx[np.argsort(dists)[:n_neighbors]]
 
         grad_s = np.zeros(3)
-        if len(valid_idx) >= 2:
-            dists = np.linalg.norm(centroids[valid_idx] - r_i, axis=1)
-            nearest = valid_idx[np.argsort(dists)[:n_neighbors]]
-
+        if len(nearest) >= 2:
             delta_r = centroids[nearest] - r_i
-            d_xi = delta_r @ t1
-            d_eta = delta_r @ t2
-            A_grad = np.column_stack([d_xi, d_eta])
-            delta_gamma = gamma_panels[nearest] - g_i
+            dist_nbr = np.linalg.norm(delta_r, axis=1)
+            weights = 1.0 / np.maximum(dist_nbr, 1e-12)
+            A_grad = np.column_stack([delta_r @ t1, delta_r @ t2]) * weights[:, None]
+            delta_gamma = (gamma_panels[nearest] - g_i) * weights
 
             # Regularized 2D least-squares fit in tangent plane (Hunsaker Eqs. C.4 - C.5)
-            coeffs, _, rank, _ = np.linalg.lstsq(A_grad, delta_gamma, rcond=1e-2)
+            coeffs, _, rank, _ = np.linalg.lstsq(A_grad, delta_gamma, rcond=0.05)
             if rank == 2:
                 grad_s = coeffs[0] * t1 + coeffs[1] * t2
 
@@ -824,13 +1093,12 @@ def compute_surface_velocity_jump(centroids, normals, gamma_panels, V_centroids,
         v_tang = V_centroids[i] - np.dot(V_centroids[i], n_i) * n_i
         speed_tang = np.linalg.norm(v_tang)
 
-        # Outer surface velocity with half-sheet tangential jump (Hunsaker Eq. 16, Fig. 5)
+        # Outer surface velocity V1 with half-sheet tangential jump (Hunsaker Eq. 16, Fig. 5)
         if speed_tang > 1e-10:
             v_dir = v_tang / speed_tang
-            jump_mag = 0.5 * abs(np.dot(grad_s, v_dir))
-            V_surf[i] = v_tang + jump_mag * v_dir
+            V_surf[i] = v_tang - 0.5 * np.dot(grad_s, v_dir) * v_dir
         else:
-            V_surf[i] = v_tang + 0.5 * grad_s
+            V_surf[i] = v_tang - 0.5 * grad_s
 
     return V_surf
 
@@ -1022,23 +1290,46 @@ def evaluate_flow_field_velocity(r_eval, vertices, faces, te_segments,
     Returns:
         V: (3,) ndarray of local velocity vector [vx, vy, vz]
     """
-    V = np.array(V_inf_vec, dtype=float, copy=True)
+    r_pt = np.asarray(r_eval, dtype=float).reshape(1, 3)
     u_inf = V_inf_vec / np.linalg.norm(V_inf_vec)
 
-    # Bound panel rings (Hunsaker Eq. 8)
-    m = len(faces)
-    for j in range(m):
-        if abs(gamma_panels[j]) > 1e-14:
-            v_ring = vortex_ring_velocity(vertices[faces[j]], r_eval, core_radius=core_radius)
-            V += gamma_panels[j] * v_ring
+    P1, P2, edge_panel, _, k_sides = _extract_ring_edges(vertices, faces)
+    edge_gamma = (
+        np.repeat(gamma_panels, k_sides)
+        if k_sides is not None
+        else gamma_panels[edge_panel]
+    )
 
-    # Trailing wake horseshoe vortices (Hunsaker Eq. 10)
-    p = len(te_segments)
-    for l in range(p):
-        if abs(gamma_wake[l]) > 1e-14:
-            te = te_segments[l]
-            w_wake = trailing_horseshoe_velocity(te['p1'], te['p2'], u_inf, r_eval, core_radius=core_radius)
-            V += gamma_wake[l] * w_wake
+    dx1 = r_pt[:, 0:1] - P1[:, 0]
+    dy1 = r_pt[:, 1:2] - P1[:, 1]
+    dz1 = r_pt[:, 2:3] - P1[:, 2]
+    dx2 = r_pt[:, 0:1] - P2[:, 0]
+    dy2 = r_pt[:, 1:2] - P2[:, 1]
+    dz2 = r_pt[:, 2:3] - P2[:, 2]
+
+    cr2 = core_radius * core_radius
+    r1 = np.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1 + cr2)
+    r2 = np.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2 + cr2)
+
+    cx = dy1 * dz2 - dz1 * dy2
+    cy = dz1 * dx2 - dx1 * dz2
+    cz = dx1 * dy2 - dy1 * dx2
+    dot12 = dx1 * dx2 + dy1 * dy2 + dz1 * dz2
+    den = 4.0 * math.pi * r1 * r2 * (r1 * r2 + dot12)
+
+    ok = np.abs(den) > 1e-12
+    fac = np.zeros_like(den)
+    fac[ok] = (r1[ok] + r2[ok]) / den[ok]
+
+    V = np.array([
+        V_inf_vec[0] + float(((fac * cx) @ edge_gamma)[0]),
+        V_inf_vec[1] + float(((fac * cy) @ edge_gamma)[0]),
+        V_inf_vec[2] + float(((fac * cz) @ edge_gamma)[0]),
+    ], dtype=float)
+
+    if len(te_segments) > 0:
+        W = _horseshoe_influence_batch(r_pt, te_segments, u_inf, core_radius=core_radius)
+        V += W[0].T @ gamma_wake
 
     return V
 
@@ -1177,9 +1468,10 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
 
     # 7. Surface Velocity Jump (S10)
     if verbose:
-        print("  [S10] Applying Appendix C local least-squares velocity jump (+- 0.5 grad_s Gamma)...")
+        print("  [S10] Applying Appendix C local least-squares velocity jump (-0.5 grad_s Gamma)...")
     V_surf = compute_surface_velocity_jump(centroids, normals, gamma_panels, V_centroids,
-                                          n_neighbors=n_neighbors)
+                                           n_neighbors=n_neighbors, faces=faces,
+                                           te_segments=te_segments)
 
     # 8. Pressure Coefficients (S11)
     Cp = compute_pressure_coefficients(V_surf, V_inf_mag)
@@ -1394,6 +1686,8 @@ class Solver:
             self.gamma_panels,
             self.V_centroids,
             n_neighbors=self.n_neighbors,
+            faces=self.faces,
+            te_segments=self.te_segments,
         )
         self.Cp = compute_pressure_coefficients(self.V_surf, self.V_inf_mag)
         self.forces = integrate_surface_forces(
