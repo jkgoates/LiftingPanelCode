@@ -9,7 +9,7 @@
         "V_inf": [1.0, 0.0, 0.0]
     },
     "off_body_grid": {
-        "turn streamline on and off bellow":,
+       "_comment": "turn streamline on and off with enabled below",
         "enabled": false,
         "x_min": -4.0, "x_max": 12.0, "n_x": 17,
         "y_min": -18.0, "y_max": 18.0, "n_y": 7,
