@@ -133,6 +133,20 @@ class ExportTests(unittest.TestCase):
         for name in names.values():
             self.assertTrue((self.folder / name).exists(), name)
 
+    def test_export_solution_skips_the_streamline_field_when_disabled(self):
+        grid = {"enabled": False, "x_min": 5.0, "x_max": 7.0, "n_x": 2, "y_min": 0.0, "y_max": 4.0, "n_y": 2,
+                "z_min": 1.0, "z_max": 1.0, "n_z": 1}
+        output = {"report_file": str(self.folder / "report.json"), "off_body_file": str(self.folder / "field.vtk"),
+                  "body_file": str(self.folder / "body.vtk"), "wake_file": str(self.folder / "wake.vtk")}
+        input_data = {"mesh": {"filename": str(WING)}, "off_body_grid": grid, "output": output}
+        postprocess.export_solution(input_data, self.solver, self.solution)
+        self.assertFalse((self.folder / "field.vtk").exists())
+        self.assertTrue((self.folder / "body.vtk").exists())
+        # switched back on, the same settings write the field
+        grid["enabled"] = True
+        postprocess.export_solution(input_data, self.solver, self.solution)
+        self.assertTrue((self.folder / "field.vtk").exists())
+
 
 class ConvergenceTests(unittest.TestCase):
     def test_table_is_sorted_and_measured_from_the_finest_mesh(self):
@@ -153,6 +167,78 @@ class ConvergenceTests(unittest.TestCase):
         self.assertEqual(row["n_panels"], Mesh(WING).N)
         for name in ["CL", "CL_KJ", "CD_press"]:
             self.assertTrue(np.isfinite(row[name]))
+        self.assertGreater(row["solve_time[s]"], 0.0)
+
+
+class OrderOfConvergenceTests(unittest.TestCase):
+    def test_matches_the_worked_example_in_the_docs(self):
+        # docs/postprocessing.md Sec. 6.7: p = 1.14, extrapolated CL = 0.471, GCI = 2.9%
+        result = postprocess.order_of_convergence([272, 864, 3344], [0.4272, 0.44856, 0.46088])
+        self.assertEqual(result["behaviour"], "monotonic")
+        self.assertAlmostEqual(result["r21"], 1.967, places=3)
+        self.assertAlmostEqual(result["r32"], 1.782, places=3)
+        self.assertAlmostEqual(result["p"], 1.14, places=2)
+        self.assertAlmostEqual(result["extrapolated"], 0.471, places=3)
+        self.assertAlmostEqual(result["GCI_fine[%]"], 2.9, places=1)
+
+    def test_recovers_second_order_from_an_exact_power_law(self):
+        # f = 0.5 + 3 h^2 with h = 1/sqrt(N): p must be 2 and the extrapolation 0.5, even with unequal ratios
+        n = [272, 864, 3344]
+        values = [0.5 + 3.0 * (1.0 / np.sqrt(N))**2 for N in n]
+        result = postprocess.order_of_convergence(n, values)
+        self.assertEqual(result["behaviour"], "monotonic")
+        self.assertAlmostEqual(result["p"], 2.0, places=8)
+        self.assertAlmostEqual(result["extrapolated"], 0.5, places=10)
+
+    def test_oscillating_and_diverging_results_get_no_extrapolation(self):
+        oscillating = postprocess.order_of_convergence([864, 3344, 13104], [0.4594, 0.4595, 0.4594])
+        self.assertEqual(oscillating["behaviour"], "oscillating")
+        diverging = postprocess.order_of_convergence([864, 3344, 13104], [0.437, 0.457, 0.400])
+        self.assertEqual(diverging["behaviour"], "oscillating")
+        growing = postprocess.order_of_convergence([864, 3344, 13104], [0.40, 0.41, 0.43])
+        self.assertEqual(growing["behaviour"], "diverging")
+        for result in [oscillating, diverging, growing]:
+            self.assertIsNone(result["p"])
+            self.assertIsNone(result["extrapolated"])
+            self.assertIsNone(result["GCI_fine[%]"])
+
+    def test_equal_steps_are_not_converging_even_with_round_off(self):
+        # 0.05 -> 0.03 -> 0.01 changes by the same amount each time (R = 1), but in floating point
+        # R comes out as 0.9999999999999998, which used to give p = 0 and a huge extrapolation
+        result = postprocess.order_of_convergence([272, 864, 3344], [0.05, 0.03, 0.01])
+        self.assertEqual(result["behaviour"], "diverging")
+        self.assertIsNone(result["p"])
+        self.assertIsNone(result["extrapolated"])
+
+    def test_summary_uses_the_three_finest_meshes(self):
+        rows = [{"mesh": "a", "n_panels": 272, "CL": 0.38, "CL_KJ": 0.46, "CD_press": 0.05},
+                {"mesh": "b", "n_panels": 864, "CL": 0.42, "CL_KJ": 0.459, "CD_press": 0.03},
+                {"mesh": "c", "n_panels": 3344, "CL": 0.45, "CL_KJ": 0.4595, "CD_press": 0.01},
+                {"mesh": "d", "n_panels": 13104, "CL": 0.46, "CL_KJ": 0.4600, "CD_press": 0.008}]
+        summary = postprocess.convergence_summary(rows)
+        self.assertEqual([s["quantity"] for s in summary], ["CL", "CL_KJ", "CD_press"])
+        for s in summary:
+            self.assertEqual(s["meshes"], "b, c, d")
+        # fewer than three meshes: no summary
+        self.assertEqual(postprocess.convergence_summary(rows[:2]), [])
+
+    def test_write_convergence_writes_the_table_summary_and_plot(self):
+        folder = Path(tempfile.mkdtemp())
+        rows = [{"mesh": "a", "n_panels": 272, "CL": 0.4272, "CL_KJ": 0.46, "CD_press": 0.05, "solve_time[s]": 1.0},
+                {"mesh": "b", "n_panels": 864, "CL": 0.44856, "CL_KJ": 0.459, "CD_press": 0.03, "solve_time[s]": 9.0},
+                {"mesh": "c", "n_panels": 3344, "CL": 0.46088, "CL_KJ": 0.4595, "CD_press": 0.01, "solve_time[s]": 99.0}]
+        rows = postprocess.convergence_table(rows)
+        postprocess.write_convergence(rows, str(folder / "conv.csv"), str(folder / "conv.png"),
+                                      str(folder / "summary.csv"))
+        table = (folder / "conv.csv").read_text().strip().split("\n")
+        self.assertIn("solve_time[s]", table[0])
+        self.assertEqual(len(table), 4)
+        summary = (folder / "summary.csv").read_text().strip().split("\n")
+        self.assertEqual(summary[0].split(",")[:2], ["quantity", "meshes"])
+        self.assertEqual(len(summary), 4)
+        self.assertTrue(summary[1].startswith("CL,"))
+        self.assertIn("monotonic", summary[1])
+        self.assertTrue((folder / "conv.png").exists())
 
 
 if __name__ == "__main__":
