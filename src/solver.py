@@ -123,7 +123,13 @@ def extract_mesh_data(mesh):
         mesh_dict: dict with 'vertices', 'faces', 'centroids', 'normals', 'areas'
     """
     vertices = np.asarray(mesh.vertices, dtype=float)
-    faces = np.asarray([row[1:] for row in mesh._panel_vertex_indices], dtype=int)
+    raw_faces = [list(row[1:]) for row in mesh._panel_vertex_indices]
+    # Keep a rectangular int array when all panels share the same vertex count (e.g., all tris or all quads);
+    # otherwise preserve a list of 1D int arrays for mixed-polygon meshes.
+    if len(raw_faces) > 0 and len({len(f) for f in raw_faces}) == 1:
+        faces = np.asarray(raw_faces, dtype=int)
+    else:
+        faces = [np.asarray(f, dtype=int) for f in raw_faces]
     centroids = np.asarray(mesh.cp, dtype=float)
     areas = np.asarray(mesh.dA, dtype=float)
 
@@ -158,9 +164,10 @@ def match_wake_to_panels(vertices, faces, wake):
     """
     edge_map = {}
     for f_idx, face in enumerate(faces):
-        for k in range(3):
+        n_verts = len(face)
+        for k in range(n_verts):
             a = int(face[k])
-            b = int(face[(k + 1) % 3])
+            b = int(face[(k + 1) % n_verts])
             key = (min(a, b), max(a, b))
             edge_map.setdefault(key, []).append((f_idx, a, b))
 
@@ -206,15 +213,19 @@ def compute_panel_geometry(vertices, faces):
     """Compute centroid, outward unit normal, and surface area for each panel.
     (Hunsaker Sandia Report Appendices A & B; Katz & Plotkin §12.1)
 
-    For planar triangular facets (e.g. from STL meshes), this computes the exact
-    closed-form properties using Stokes' theorem and triangle geometry:
-        Normal:   n = (p1 - p0) x (p2 - p0) / ||(p1 - p0) x (p2 - p0)||
-        Area:     A = 0.5 * ||(p1 - p0) x (p2 - p0)||
-        Centroid: r_CG = (p0 + p1 + p2) / 3.0
+    Supports triangular, quadrilateral, and arbitrary planar n-sided polygon
+    panels (including mixed meshes):
+        - Fast vectorized path when all panels are 3-vertex triangles.
+        - General planar polygon path (Hunsaker Eqs. A.14, A.15, B.8) via
+          sub-triangle fan decomposition from the first vertex:
+              a_k   = 0.5 * (p_k - p_0) x (p_{k+1} - p_0)
+              A_vec = sum_k a_k,   A = ||A_vec||,   n = A_vec / A
+              r_CG  = sum_k (a_k . n) * (p_0 + p_k + p_{k+1}) / (3 * A)
 
     Parameters:
         vertices: (n_v, 3) ndarray of vertex coordinates [x, y, z]
-        faces:    (n_f, 3) ndarray of integer vertex indices defining each facet
+        faces:    (n_f, 3) or (n_f, 4) ndarray, or sequence of 1D integer vertex
+                  index lists/arrays for mixed-polygon meshes
 
     Returns:
         centroids: (n_f, 3) ndarray of panel centroid coordinates
@@ -222,29 +233,68 @@ def compute_panel_geometry(vertices, faces):
         areas:     (n_f,) ndarray of panel planar surface areas
     """
     vertices = np.asarray(vertices, dtype=float)
-    faces = np.asarray(faces, dtype=int)
 
-    p0 = vertices[faces[:, 0]]
-    p1 = vertices[faces[:, 1]]
-    p2 = vertices[faces[:, 2]]
+    # Fast vectorized path for uniform triangular meshes
+    if isinstance(faces, np.ndarray) and faces.ndim == 2 and faces.shape[1] == 3:
+        p0 = vertices[faces[:, 0]]
+        p1 = vertices[faces[:, 1]]
+        p2 = vertices[faces[:, 2]]
 
-    # Panel centroids (Hunsaker Eq. B.8, Katz & Plotkin Eq. 12.2)
-    centroids = (p0 + p1 + p2) / 3.0
+        # Panel centroids (Hunsaker Eq. B.8, Katz & Plotkin Eq. 12.2)
+        centroids = (p0 + p1 + p2) / 3.0
 
-    # Cross product of facet edge vectors (Hunsaker Eq. A.14)
-    v10 = p1 - p0
-    v20 = p2 - p0
-    cross = np.cross(v10, v20)
-    cross_norm = np.linalg.norm(cross, axis=1, keepdims=True)
+        # Cross product of facet edge vectors (Hunsaker Eq. A.14)
+        cross = np.cross(p1 - p0, p2 - p0)
+        cross_norm = np.linalg.norm(cross, axis=1, keepdims=True)
 
-    # Avoid division by zero on degenerate zero-area facets
-    valid = (cross_norm[:, 0] > 1e-14)
-    normals = np.zeros_like(cross)
-    normals[valid] = cross[valid] / cross_norm[valid]
-    normals[~valid] = np.array([0.0, 0.0, 1.0])
+        # Avoid division by zero on degenerate zero-area facets
+        valid = (cross_norm[:, 0] > 1e-14)
+        normals = np.zeros_like(cross)
+        normals[valid] = cross[valid] / cross_norm[valid]
+        normals[~valid] = np.array([0.0, 0.0, 1.0])
 
-    # Facet surface area (Hunsaker Eq. A.15)
-    areas = 0.5 * cross_norm[:, 0]
+        # Facet surface area (Hunsaker Eq. A.15)
+        areas = 0.5 * cross_norm[:, 0]
+        return centroids, normals, areas
+
+    # General n-sided planar polygon path (quads, n-gons, or mixed meshes)
+    n_f = len(faces)
+    centroids = np.zeros((n_f, 3), dtype=float)
+    normals = np.zeros((n_f, 3), dtype=float)
+    areas = np.zeros(n_f, dtype=float)
+
+    for i, face in enumerate(faces):
+        pts = vertices[np.asarray(face, dtype=int)]
+        n_v = len(pts)
+        if n_v < 3:
+            raise ValueError(f"Panel {i} has fewer than 3 vertices ({n_v}).")
+
+        p0 = pts[0]
+        vec_area = np.zeros(3, dtype=float)
+        sub_areas = []
+        sub_centroids = []
+
+        for k in range(1, n_v - 1):
+            a_k = 0.5 * np.cross(pts[k] - p0, pts[k + 1] - p0)
+            c_k = (p0 + pts[k] + pts[k + 1]) / 3.0
+            vec_area += a_k
+            sub_areas.append(a_k)
+            sub_centroids.append(c_k)
+
+        area_i = float(np.linalg.norm(vec_area))
+        if area_i > 1e-14:
+            n_i = vec_area / area_i
+            # Signed sub-triangle area weights handle both convex and non-convex planar polygons
+            cg_num = np.zeros(3, dtype=float)
+            for a_k, c_k in zip(sub_areas, sub_centroids):
+                cg_num += float(np.dot(a_k, n_i)) * c_k
+            centroids[i] = cg_num / area_i
+            normals[i] = n_i
+            areas[i] = area_i
+        else:
+            centroids[i] = np.mean(pts, axis=0)
+            normals[i] = np.array([0.0, 0.0, 1.0])
+            areas[i] = 0.0
 
     return centroids, normals, areas
 
@@ -417,7 +467,6 @@ def find_trailing_edge_segments(vertices, faces, centroids, normals,
                      'delta_y': float spanwise width
     """
     vertices = np.asarray(vertices, dtype=float)
-    faces = np.asarray(faces, dtype=int)
     centroids = np.asarray(centroids, dtype=float)
     normals = np.asarray(normals, dtype=float)
 
@@ -428,9 +477,10 @@ def find_trailing_edge_segments(vertices, faces, centroids, normals,
     # Build half-edge dictionary: edge_key -> list of (face_idx, directed_p1, directed_p2)
     edge_map = {}
     for f_idx, face in enumerate(faces):
-        for k in range(3):
+        n_verts = len(face)
+        for k in range(n_verts):
             i1 = int(face[k])
-            i2 = int(face[(k + 1) % 3])
+            i2 = int(face[(k + 1) % n_verts])
             key = (min(i1, i2), max(i1, i2))
             if key not in edge_map:
                 edge_map[key] = []
@@ -536,10 +586,14 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
     A = np.zeros((n_eqs, n_vars), dtype=float)
     V_tensor = np.zeros((m, n_vars, 3), dtype=float)
 
-    # Pre-extract panel vertices for efficiency
-    f_v0 = vertices[faces[:, 0]]
-    f_v1 = vertices[faces[:, 1]]
-    f_v2 = vertices[faces[:, 2]]
+    is_uniform_tris = (
+        isinstance(faces, np.ndarray) and faces.ndim == 2 and faces.shape[1] == 3
+    )
+    if is_uniform_tris:
+        # Pre-extract triangle vertices for fast inner loop
+        f_v0 = vertices[faces[:, 0]]
+        f_v1 = vertices[faces[:, 1]]
+        f_v2 = vertices[faces[:, 2]]
 
     # 1. Flow tangency boundary condition: Rows 0 to m-1 (Hunsaker Eq. 4)
     for i in range(m):
@@ -551,11 +605,18 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
             if i == j:
                 # Self-influence of a flat planar polygon ring on its own centroid is zero
                 continue
-            v_ring = (
-                biot_savart_segment(f_v0[j], f_v1[j], c_i, core_radius=core_radius) +
-                biot_savart_segment(f_v1[j], f_v2[j], c_i, core_radius=core_radius) +
-                biot_savart_segment(f_v2[j], f_v0[j], c_i, core_radius=core_radius)
-            )
+            if is_uniform_tris:
+                v_ring = (
+                    biot_savart_segment(f_v0[j], f_v1[j], c_i, core_radius=core_radius) +
+                    biot_savart_segment(f_v1[j], f_v2[j], c_i, core_radius=core_radius) +
+                    biot_savart_segment(f_v2[j], f_v0[j], c_i, core_radius=core_radius)
+                )
+            else:
+                v_ring = vortex_ring_velocity(
+                    vertices[np.asarray(faces[j], dtype=int)],
+                    c_i,
+                    core_radius=core_radius,
+                )
             V_tensor[i, j, :] = v_ring
             A[i, j] = np.dot(v_ring, n_i)
 
