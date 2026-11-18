@@ -15,12 +15,12 @@ class MeshImportTests(unittest.TestCase):
     def test_imports_provided_mesh(self):
         imported_mesh = Mesh(PROJECT_ROOT / "meshes" / "wing_RA10_coarse.stl")
 
-        self.assertEqual(imported_mesh.N, 232)
-        self.assertEqual(imported_mesh.N_vert, 118)
-        self.assertEqual(imported_mesh.panels.shape, (232,))
-        self.assertEqual(imported_mesh.cp.shape, (232, 3))
-        self.assertEqual(imported_mesh.n.shape, (232, 3))
-        self.assertEqual(imported_mesh.dA.shape, (232,))
+        self.assertEqual(imported_mesh.N, 272)
+        self.assertEqual(imported_mesh.N_vert, 138)
+        self.assertEqual(imported_mesh.panels.shape, (272,))
+        self.assertEqual(imported_mesh.cp.shape, (272, 3))
+        self.assertEqual(imported_mesh.n.shape, (272, 3))
+        self.assertEqual(imported_mesh.dA.shape, (272,))
         self.assertTrue(np.all(imported_mesh.dA > 0.0))
         np.testing.assert_allclose(
             np.linalg.norm(imported_mesh.n, axis=1), 1.0, rtol=1e-7, atol=1e-7
