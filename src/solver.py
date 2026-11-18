@@ -18,7 +18,7 @@ References:
         §2.6  Surface Velocity & Pressure Coefficient (Eqs. 15 - 17)
         §2.7  Total Force & Moment Integration (Eqs. 18 - 20)
         §2.8  Kutta-Joukowski Trefftz-Plane Lift Verification (Eq. 21)
-        Appendix A: Polygon Area & Normal Vectors (Eqs. A.1 - A.15)
+        Appendix A: Polygon Area & Normal Vectors (Eqs. A.1 - A.14)
         Appendix B: Polygon Centroid / Center of Gravity (Eqs. B.1 - B.8)
         Appendix C: Local Least-Squares Surface Velocity Gradient Jump (Eqs. C.1 - C.8)
 
@@ -216,7 +216,7 @@ def compute_panel_geometry(vertices, faces):
     Supports triangular, quadrilateral, and arbitrary planar n-sided polygon
     panels (including mixed meshes):
         - Fast vectorized path when all panels are 3-vertex triangles.
-        - General planar polygon path (Hunsaker Eqs. A.14, A.15, B.8) via
+        - General planar polygon path (Hunsaker Eqs. A.14, B.8) via
           sub-triangle fan decomposition from the first vertex:
               a_k   = 0.5 * (p_k - p_0) x (p_{k+1} - p_0)
               A_vec = sum_k a_k,   A = ||A_vec||,   n = A_vec / A
@@ -253,7 +253,7 @@ def compute_panel_geometry(vertices, faces):
         normals[valid] = cross[valid] / cross_norm[valid]
         normals[~valid] = np.array([0.0, 0.0, 1.0])
 
-        # Facet surface area (Hunsaker Eq. A.15)
+        # Facet surface area (Hunsaker Appendix A, Eq. A.14)
         areas = 0.5 * cross_norm[:, 0]
         return centroids, normals, areas
 
