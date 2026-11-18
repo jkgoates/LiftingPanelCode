@@ -602,9 +602,9 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
 
         # Influence of bound surface vortex rings j = 0 .. m-1 (Hunsaker Eq. 8)
         for j in range(m):
-            if i == j:
-                # Self-influence of a flat planar polygon ring on its own centroid is zero
-                continue
+            # if i == j:
+            #     # Self-influence of a flat planar polygon ring on its own centroid is zero
+            #     continue
             if is_uniform_tris:
                 v_ring = (
                     biot_savart_segment(f_v0[j], f_v1[j], c_i, core_radius=core_radius) +
