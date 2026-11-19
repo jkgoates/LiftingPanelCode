@@ -8,26 +8,27 @@ Project: Lifting Vortex Code with Trailing Vortices (3D Panel Method)
 
 References:
     Hunsaker, D. F., "Panel Code Addition to CACTUS",
-        Sandia National Laboratories Report, Albuquerque, NM:
-        §2.0  Governing Potential Flow Equations & Boundary Conditions (Eqs. 1 - 2)
-        §2.1  Biot-Savart Law for Straight Line Segment (Eq. 3)
-        §2.2  Closed Vortex Ring Velocity & Normal Flow Condition (Eqs. 4 - 9)
-        §2.3  Trailing Horseshoe Vortices for Lifting Bodies (Eq. 10)
-        §2.4  Kutta Condition at Sharp Trailing Edges (Eqs. 11 - 13)
-        §2.5  Singularity / Rank-Deficiency Resolution (Eqs. 7, 14)
-        §2.6  Surface Velocity & Pressure Coefficient (Eqs. 15 - 17)
-        §2.7  Total Force & Moment Integration (Eqs. 18 - 20)
-        §2.8  Kutta-Joukowski Trefftz-Plane Lift Verification (Eq. 21)
-        Appendix A: Polygon Area & Normal Vectors (Eqs. A.1 - A.14)
-        Appendix B: Polygon Centroid / Center of Gravity (Eqs. B.1 - B.8)
-        Appendix C: Local Least-Squares Surface Velocity Gradient Jump (Eqs. C.1 - C.8)
+        Sandia National Laboratories Report, Albuquerque, NM (Aug. 19, 2010):
+        Solution Methodology (pp. 5 - 13):
+            Biot-Savart Straight Segment & Vortex Ring Velocity (Eqs. 1 - 3)
+            Non-Lifting Boundary Condition & Pinned System (Eqs. 4 - 7)
+            Lifting Bodies: Trailing Horseshoe Vortices & Velocity (Eqs. 8 - 10)
+            Lifting Boundary Condition, 3D Kutta Condition & Pinned System (Eqs. 11 - 14)
+            Pressure Evaluation & Surface Force/Moment Integration (Eq. 15, p. 13)
+            Surface Velocity Evaluation with Principal-Value Jump (Eq. 16)
+        Appendix A: Area of a Polygon via Stokes's Theorem (Eqs. A.1 - A.14)
+        Appendix B: Centroid of a Polygon (Eqs. B.1 - B.8)
+        Appendix C: Least Squares Gradient Estimation (Eqs. C.1 - C.5, p. C-2)
 
     Katz, J., and Plotkin, A., "Low-Speed Aerodynamics", 2nd Edition:
+        Chapter 8: Three-Dimensional Small-Disturbance Solutions
+            §8.4    Far-Field Calculation of Induced Drag & Lift (Eqs. 8.146 - 8.147)
+        Chapter 10: Three-Dimensional Singularity Elements
+            §10.4.5 Straight Vortex Line Segment VORTXL (Eq. 10.116)
         Chapter 12: Three-Dimensional Numerical Solutions
-            §12.1  General Formulation & Boundary Conditions (Eqs. 12.1 - 12.8)
-            §12.2  Vortex Ring Element Influence Coefficients (Eqs. 12.9 - 12.22)
-            §12.3  Horseshoe Wake Model & Kutta Condition (Eqs. 12.23 - 12.30)
-            §12.4  Far-Field / Trefftz Plane Analysis (Eqs. 12.31 - 12.35)
+            §12.1   Lifting-Line Solution by Horseshoe Elements (Eqs. 12.1 - 12.10a)
+            §12.3   Lifting-Surface Solution by Vortex Ring Elements (Eqs. 12.15 - 12.28, p. 347)
+            §12.5   First-Order Potential-Based Panel Methods (Eqs. 12.29 - 12.41)
 
     Phillips, W. F., "Mechanics of Flight", 2nd Edition:
         Chapter 2: Potential Flow Fundamentals
@@ -41,20 +42,21 @@ Step    Module / Primary Function           Reference Eq.          Description
 S0a     load_input_json()                   Input Config           Parse group project input.json (mesh, flow, output)
 S0b     extract_mesh_data()                 Mesh Adapter           Extract vertices, faces, centroids, unit normals from Mesh
 S0c     match_wake_to_panels()              Wake Adapter           Pair Horseshoe wake objects to adjacent TE panels (Kutta)
-S1      compute_panel_geometry()            Hunsaker App. A, B     Panel areas, outward normals, and centroids
-S2      biot_savart_segment()               Hunsaker Eq. 3         Velocity induced by finite straight vortex segment
-S3      vortex_ring_velocity()              Hunsaker Eqs. 4, 8     Velocity induced by closed polygon vortex ring
-S4      trailing_horseshoe_velocity()       Hunsaker Eq. 10        Velocity induced by semi-infinite horseshoe vortex
-S5      find_trailing_edge_segments()       Hunsaker §2.4, K&P 12  Detect adjacent upper/lower panels at sharp TE
-S6      build_influence_matrix()            Hunsaker Eqs. 4-14     Assemble [A] matrix (BCs, Kutta, rank pinning)
-S7      build_rhs_vector()                  Hunsaker Eq. 5         Freestream normal velocity RHS {-V_inf . n}
-S8      solve_circulation_system()          Hunsaker Eq. 14        Least-squares solve for panel & wake circulations
-S9      compute_centroid_velocities()       Hunsaker Eqs. 15-16    Average induced velocity at panel control points
-S10     compute_surface_velocity_jump()     Hunsaker App. C (C1-8) Local least-squares gradient jump (+- 0.5 grad_s Gamma)
-S11     compute_pressure_coefficients()     Hunsaker Eq. 17        Surface Cp via Bernoulli equation
-S12     integrate_surface_forces()          Hunsaker Eqs. 18-20    Surface pressure force & moment integration (CL, CD, CS)
-S13     kutta_joukowski_lift()              Hunsaker Eq. 21        Far-field Trefftz plane wake lift verification
-S14     evaluate_flow_field_velocity()      Hunsaker Eqs. 8, 10    Velocity query at arbitrary 3D points (for streamlines)
+S1      compute_panel_geometry()            Hunsaker p.5, App. A-B Panel areas, outward normals, and centroids
+S2      biot_savart_segment()               Hunsaker Eqs. 1, 3     Velocity induced by finite straight vortex segment
+S3      vortex_ring_velocity()              Hunsaker Eqs. 2, 3     Velocity induced by closed polygon vortex ring
+S4      trailing_horseshoe_velocity()       Hunsaker Eqs. 8, 10    Velocity induced by semi-infinite horseshoe vortex
+S5      find_trailing_edge_segments()       Hunsaker p.7-9, K&P 12 Detect adjacent upper/lower panels at sharp TE
+S6      build_influence_matrix()            Hunsaker Eqs. 3-14     Assemble [A] matrix (BCs, Kutta, rank pinning)
+S7      build_rhs_vector()                  Hunsaker Eqs. 5, 11-14 Freestream normal velocity RHS {-V_inf . n}
+S8      solve_circulation_system()          Hunsaker Eq. 14, App.C Least-squares solve for panel & wake circulations
+S9      compute_centroid_velocities()       Hunsaker Eqs. 2, 9     Average induced velocity at panel control points
+S10     compute_surface_velocity_jump()     Hunsaker Eq.16, C1-C5  Local least-squares gradient jump (+- 0.5 grad_s Gamma)
+S11     compute_pressure_coefficients()     Hunsaker Eq. 15        Surface Cp via Bernoulli equation
+S12     integrate_surface_forces()          Hunsaker p.13, K&P 12  Surface pressure force & moment integration (CL, CD, CS)
+S13     kutta_joukowski_lift()              K&P Eqs. 8.147, 12.9   Far-field Trefftz plane wake lift verification
+S13b    trefftz_plane_induced_drag()        K&P 8.146, 12.10a      Far-field Trefftz-plane wake induced drag (CD_KJ)
+S14     evaluate_flow_field_velocity()      Hunsaker Eqs. 2, 9, 10 Velocity query at arbitrary 3D points (for streamlines)
 S15     system_setup_and_solve()            Workflow Master        End-to-end driver: mesh & flight op -> full solution dict
 S16     solve_from_mesh()                   src/ Integration       Direct driver for src.mesh.Mesh & input.json config
 S17     Solver (class)                      src/main.py Interface  Object-oriented wrapper matching main.py Solver(mesh, wake)
@@ -211,7 +213,7 @@ def match_wake_to_panels(vertices, faces, wake):
 
 def compute_panel_geometry(vertices, faces):
     """Compute centroid, outward unit normal, and surface area for each panel.
-    (Hunsaker Sandia Report Appendices A & B; Katz & Plotkin §12.1)
+    (Hunsaker Sandia Report p. 5, Appendices A & B; Katz & Plotkin §12.3, Eq. 12.20)
 
     Supports triangular, quadrilateral, and arbitrary planar n-sided polygon
     panels (including mixed meshes):
@@ -240,10 +242,10 @@ def compute_panel_geometry(vertices, faces):
         p1 = vertices[faces[:, 1]]
         p2 = vertices[faces[:, 2]]
 
-        # Panel centroids (Hunsaker Eq. B.8, Katz & Plotkin Eq. 12.2)
+        # Panel centroids (Hunsaker Eq. B.8; Katz & Plotkin §12.3)
         centroids = (p0 + p1 + p2) / 3.0
 
-        # Cross product of facet edge vectors (Hunsaker Eq. A.14)
+        # Cross product of facet edge vectors (Hunsaker p. 5)
         cross = np.cross(p1 - p0, p2 - p0)
         cross_norm = np.linalg.norm(cross, axis=1, keepdims=True)
 
@@ -306,7 +308,7 @@ def compute_panel_geometry(vertices, faces):
 def biot_savart_segment(p1, p2, r_eval, core_radius=1e-8):
     """Compute velocity induced at field point r_eval by a straight vortex segment
     from p1 to p2 with unit circulation (Gamma = 1.0).
-    (Hunsaker Sandia Report Eq. 3; Phillips & Snyder 2000; Katz & Plotkin Eq. 12.11)
+    (Hunsaker Sandia Report Eqs. 1 & 3; Phillips & Snyder 2000; Katz & Plotkin §10.4.5, Eq. 10.116)
 
     Mathematical Formulation:
         Let r1_vec = r_eval - p1,  r2_vec = r_eval - p2
@@ -349,7 +351,7 @@ def biot_savart_segment(p1, p2, r_eval, core_radius=1e-8):
 def vortex_ring_velocity(panel_vertices, r_eval, core_radius=1e-8):
     """Compute the velocity induced at r_eval by a closed polygonal vortex ring
     of unit circulation (Gamma = 1.0).
-    (Hunsaker Sandia Report Eqs. 4 & 8; Katz & Plotkin Eqs. 12.13 - 12.16)
+    (Hunsaker Sandia Report Eqs. 2 & 3; Katz & Plotkin §12.3, Eqs. 12.16 - 12.17)
 
     By Helmholtz's vortex theorems, summing the Biot-Savart velocity of all
     boundary segments forming a closed polygon creates a divergence-free vortex ring:
@@ -379,7 +381,7 @@ def vortex_ring_velocity(panel_vertices, r_eval, core_radius=1e-8):
 def trailing_horseshoe_velocity(p1, p2, u_inf, r_eval, core_radius=1e-8):
     """Compute velocity induced at r_eval by a trailing horseshoe vortex
     shed from trailing-edge segment p1 -> p2 with unit circulation (Gamma = 1.0).
-    (Hunsaker Sandia Report Eq. 10; Katz & Plotkin Eqs. 12.18 - 12.22)
+    (Hunsaker Sandia Report Eqs. 8 & 10; Katz & Plotkin §12.1, Eqs. 12.4 - 12.4a)
 
     A horseshoe vortex consists of three parts:
         1. Semi-infinite trailing leg coming from downstream infinity to p1
@@ -442,7 +444,7 @@ def trailing_horseshoe_velocity(p1, p2, u_inf, r_eval, core_radius=1e-8):
 def find_trailing_edge_segments(vertices, faces, centroids, normals,
                                 aft_fraction=0.5, max_cos_angle=0.2):
     """Identify sharp trailing-edge segments where upper and lower panels meet.
-    (Hunsaker Sandia Report §2.4; Katz & Plotkin §12.3)
+    (Hunsaker Sandia Report "Lifting Bodies", pp. 7 - 9; Katz & Plotkin §12.3 & §12.5, Eq. 12.33)
 
     Finds topological surface edges that meet three criteria:
         1. Shared by exactly two facets (internal surface edge)
@@ -631,17 +633,17 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
                            u_inf, pin_panel_idx=0, core_radius=1e-8,
                            compute_v_tensor=None, chunk_size=128):
     """Assemble the aerodynamic influence coefficient matrix [A] (vectorized, chunked).
-    (Hunsaker Sandia Report Eqs. 4 - 14; Katz & Plotkin Eqs. 12.8, 12.28)
+    (Hunsaker Sandia Report Eqs. 3 - 14; Katz & Plotkin Eqs. 12.22, 12.33)
 
     Structure of System Matrix [A] (size (m + p + 1) x (m + p)):
         - Rows 0 to m-1: Flow tangency boundary conditions (V . n = 0) at all m panel centroids:
             sum_{j=1}^m (v_ij . n_i) * Gamma_j + sum_{l=1}^p (w_il . n_i) * Gamma_{w,l} = -V_inf . n_i
-            (Hunsaker Eq. 4; Katz & Plotkin Eq. 12.8)
+            (Hunsaker Eqs. 4 & 11; Katz & Plotkin Eqs. 12.1, 12.22)
 
         - Rows m to m+p-1: Kutta condition at each sharp trailing-edge segment:
             Gamma_A - Gamma_B + Gamma_C = 0
             where A is upper panel, B is lower panel, C is wake horseshoe l
-            (Hunsaker Eq. 12; Katz & Plotkin Eq. 12.28)
+            (Hunsaker Eq. 12; Katz & Plotkin §12.5, Eq. 12.33)
 
         - Row m+p: Singularity / rank-deficiency resolution constraint:
             Gamma_{pin} = 0
@@ -676,7 +678,7 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
     P1, P2, edge_panel, _, k_sides = _extract_ring_edges(vertices, faces)
     cr2 = core_radius * core_radius
 
-    # 1. Flow tangency boundary condition: Rows 0 to m-1 (Hunsaker Eq. 4)
+    # 1. Flow tangency boundary condition: Rows 0 to m-1 (Hunsaker Eqs. 4 & 11)
     for i0 in range(0, m, chunk_size):
         i1 = min(i0 + chunk_size, m)
         b_len = i1 - i0
@@ -752,7 +754,7 @@ def build_influence_matrix(vertices, faces, centroids, normals, te_segments,
 
 def build_rhs_vector(normals, V_inf_vec, n_te_segments):
     """Assemble right-hand side vector {b} for the aerodynamic linear system.
-    (Hunsaker Sandia Report Eq. 5; Katz & Plotkin Eq. 12.8)
+    (Hunsaker Sandia Report Eqs. 5, 11, 13 - 14; Katz & Plotkin Eqs. 12.8, 12.24)
 
     Structure of RHS Vector {b} (size m + p + 1):
         - Elements 0 to m-1: -V_inf . n_i  (freestream normal flow at centroids)
@@ -771,7 +773,7 @@ def build_rhs_vector(normals, V_inf_vec, n_te_segments):
     p = n_te_segments
     b = np.zeros(m + p + 1, dtype=float)
 
-    # Freestream normal flux on each surface panel (Hunsaker Eq. 5)
+    # Freestream normal flux on each surface panel (Hunsaker Eqs. 5 & 11)
     b[:m] = -np.dot(normals, V_inf_vec)
 
     # Kutta condition rows and pinning row remain 0.0 (Hunsaker Eqs. 12 & 14)
@@ -858,48 +860,72 @@ def _gmres_normal(A, b, tol=1e-8, restart=80, maxiter=800):
     return x
 
 
-def solve_circulation_system(A, b, method="auto", tol=1e-8, maxiter=800, restart=80):
+def solve_circulation_system(A, b, method="auto", tol=1e-8, maxiter=800, restart=80,
+                             row_scale=True):
     """Solve the overdetermined linear system [A]{Gamma} = {b}.
-    (Hunsaker Sandia Report Eq. 14; Katz & Plotkin §12.3)
+    (Hunsaker Sandia Report Eq. 14 & Appendix C; Katz & Plotkin §12.3)
 
     Methods:
         - 'lstsq':  Full SVD least squares (np.linalg.lstsq).
-        - 'normal': Normal equations [A^T A]{Gamma} = [A^T]{b} via BLAS/LAPACK.
+        - 'normal': Normal equations [Aw^T Aw]{Gamma} = [Aw^T]{bw} via BLAS/LAPACK.
+        - 'qr':     Reduced QR least squares without squaring condition number.
         - 'gmres':  Matrix-free Jacobi-preconditioned restarted GMRES on normal equations.
         - 'auto':   Uses 'lstsq' for n_vars <= 1000 and 'normal' for n_vars > 1000
-                    (falling back to 'lstsq' if ill-conditioned).
+                    (falling back to QR/'lstsq' if ill-conditioned).
 
     Parameters:
-        A:       ((m + p + 1), (m + p)) ndarray, influence matrix
-        b:       (m + p + 1,) ndarray, right-hand side vector
-        method:  str, 'auto', 'lstsq', 'normal', or 'gmres'
-        tol:     float, relative residual tolerance for GMRES
-        maxiter: int, max GMRES iterations
-        restart: int, GMRES Krylov subspace restart size
+        A:         ((m + p + 1), (m + p)) ndarray, influence matrix
+        b:         (m + p + 1,) ndarray, right-hand side vector
+        method:    str, 'auto', 'lstsq', 'normal', 'qr', or 'gmres'
+        tol:       float, relative residual tolerance for GMRES
+        maxiter:   int, max GMRES iterations
+        restart:   int, GMRES Krylov subspace restart size
+        row_scale: bool, if True equilibrate each row by its L2 norm so tiny sliver
+                   panels do not dominate least-squares weighting (default: True)
 
     Returns:
         gamma_total: (m + p,) ndarray, solved circulation values
-        residuals:   float or ndarray, sum of squared residuals
+        residuals:   (1,) ndarray, physical unweighted sum of squared residuals
     """
     n_vars = A.shape[1]
+    if row_scale:
+        row_norms = np.linalg.norm(A, axis=1)
+        row_norms[row_norms < 1e-12] = 1.0
+        Aw = A / row_norms[:, None]
+        bw = b / row_norms
+    else:
+        Aw = A
+        bw = b
+
+    gamma_total = None
     if method == "gmres":
-        gamma_total = _gmres_normal(A, b, tol=tol, restart=restart, maxiter=maxiter)
-        res = A @ gamma_total - b
-        return gamma_total, np.array([float(np.dot(res, res))])
-
-    if method == "normal" or (method == "auto" and n_vars > 1000):
+        gamma_total = _gmres_normal(Aw, bw, tol=tol, restart=restart, maxiter=maxiter)
+    elif method == "normal" or (method == "auto" and n_vars > 1000):
         try:
-            ATA = A.T @ A
-            ATb = A.T @ b
+            ATA = Aw.T @ Aw
+            ATb = Aw.T @ bw
             gamma_total = np.linalg.solve(ATA, ATb)
-            res = A @ gamma_total - b
-            residuals = np.array([float(np.dot(res, res))])
-            return gamma_total, residuals
         except np.linalg.LinAlgError:
-            pass
+            gamma_total = None
+    elif method == "qr":
+        try:
+            Q, R = np.linalg.qr(Aw, mode="reduced")
+            gamma_total = np.linalg.solve(R, Q.T @ bw)
+        except np.linalg.LinAlgError:
+            gamma_total = None
 
-    gamma_total, residuals, rank, s = np.linalg.lstsq(A, b, rcond=None)
-    return gamma_total, residuals
+    if gamma_total is None:
+        if method in ("normal", "qr") or (method == "auto" and n_vars > 1000):
+            try:
+                Q, R = np.linalg.qr(Aw, mode="reduced")
+                gamma_total = np.linalg.solve(R, Q.T @ bw)
+            except np.linalg.LinAlgError:
+                gamma_total = None
+        if gamma_total is None:
+            gamma_total, _, _, _ = np.linalg.lstsq(Aw, bw, rcond=None)
+
+    res = A @ gamma_total - b
+    return gamma_total, np.array([float(np.dot(res, res))])
 
 
 # =============================================================================
@@ -910,7 +936,7 @@ def compute_centroid_velocities(vertices, faces, centroids, te_segments,
                                 gamma_panels, gamma_wake, V_inf_vec,
                                 V_tensor=None, core_radius=1e-8, chunk_size=128):
     """Compute the total velocity at each panel centroid (control point).
-    (Hunsaker Sandia Report Eqs. 15 & 16; Katz & Plotkin Eq. 12.9)
+    (Hunsaker Sandia Report Eqs. 2 & 9; Katz & Plotkin §12.5, Eq. 12.39)
 
     Total velocity at centroid i:
         V_i = V_inf + sum_{j=1}^m Gamma_j * v_ij + sum_{l=1}^p Gamma_{w,l} * w_il
@@ -939,7 +965,7 @@ def compute_centroid_velocities(vertices, faces, centroids, te_segments,
     gamma_total = np.concatenate([gamma_panels, gamma_wake])
 
     if V_tensor is not None:
-        # Fast vector product: sum_k V_tensor[i, k, :] * gamma[k] (Hunsaker Eq. 15)
+        # Fast vector product: sum_k V_tensor[i, k, :] * gamma[k] (Hunsaker Eqs. 2 & 9)
         V_ind = np.tensordot(V_tensor, gamma_total, axes=([1], [0]))  # shape (m, 3)
         return V_inf_vec + V_ind
 
@@ -997,7 +1023,7 @@ def compute_surface_velocity_jump(centroids, normals, gamma_panels, V_centroids,
                                   min_normal_dot=0.80):
     """Compute physical surface velocities incorporating the discontinuous
     tangential velocity jump across the surface vortex sheet.
-    (Hunsaker Sandia Report Eq. 16 & Appendix C, Eqs. C.1 - C.8; Katz & Plotkin §12.3)
+    (Hunsaker Sandia Report Eq. 16 & Appendix C, Eqs. C.1 - C.5, p. C-2; Katz & Plotkin §12.5, Eqs. 12.37 - 12.39)
 
     Theoretical Context:
         Biot-Savart evaluation directly on the boundary only computes the mean
@@ -1109,7 +1135,7 @@ def compute_surface_velocity_jump(centroids, normals, gamma_panels, V_centroids,
 
 def compute_pressure_coefficients(V_surf, V_inf_mag):
     """Compute surface pressure coefficient Cp at each panel from Bernoulli's equation.
-    (Hunsaker Sandia Report Eq. 17; Katz & Plotkin Eq. 12.9)
+    (Hunsaker Sandia Report Eq. 15; Katz & Plotkin §12.5, Eq. 12.40)
 
     Mathematical Formulation:
         Cp_i = 1.0 - ( ||V_surf,i|| / V_inf )^2
@@ -1135,7 +1161,7 @@ def integrate_surface_forces(Cp, areas, normals, centroids, alpha_rad, beta_rad,
                              rho_inf=1.225, V_inf_mag=10.0):
     """Integrate surface pressure coefficients to obtain net aerodynamic forces
     and moments in body and wind axes.
-    (Hunsaker Sandia Report Eqs. 18 - 20; Katz & Plotkin §12.3)
+    (Hunsaker Sandia Report p. 13; Katz & Plotkin §12.5, Eq. 12.41)
 
     Mathematical Formulation:
         Body force:
@@ -1169,16 +1195,16 @@ def integrate_surface_forces(Cp, areas, normals, centroids, alpha_rad, beta_rad,
     """
     q_inf = 0.5 * rho_inf * (V_inf_mag**2)
 
-    # Differential force on each panel: dF_i = -Cp_i * q_inf * A_i * n_i (Hunsaker Eq. 18)
+    # Differential force on each panel: dF_i = -Cp_i * q_inf * A_i * n_i (Hunsaker p. 13; K&P Eq. 12.41)
     dF = -Cp[:, np.newaxis] * q_inf * areas[:, np.newaxis] * normals
     F_body = np.sum(dF, axis=0)
 
-    # Differential moment about r_ref: dM_i = (r_i - r_ref) x dF_i (Hunsaker Eq. 19)
+    # Differential moment about r_ref: dM_i = (r_i - r_ref) x dF_i (Hunsaker p. 13)
     r_arm = centroids - r_ref
     dM = np.cross(r_arm, dF)
     M_body = np.sum(dM, axis=0)
 
-    # Body-to-wind transformation (Phillips §1.3, Hunsaker Eq. 20)
+    # Body-to-wind transformation (Phillips §1.3)
     cos_a = math.cos(alpha_rad)
     sin_a = math.sin(alpha_rad)
     cos_b = math.cos(beta_rad)
@@ -1228,7 +1254,7 @@ def integrate_surface_forces(Cp, areas, normals, centroids, alpha_rad, beta_rad,
 
 def kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.225):
     """Compute total lift using the far-field Trefftz-plane Kutta-Joukowski theorem.
-    (Hunsaker Sandia Report Eq. 21; Katz & Plotkin §12.4, Eq. 12.33)
+    (Katz & Plotkin §8.4 Eq. 8.147 & §12.1 Eq. 12.9)
 
     Theoretical Context:
         Far downstream in the Trefftz plane, the net vertical momentum flux
@@ -1252,13 +1278,65 @@ def kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.22
     """
     total_circ_span = 0.0
     for l, te in enumerate(te_segments):
-        # Net bound circulation shed into the wake: Gamma_bound = Gamma_upper - Gamma_lower = -Gamma_wake
-        total_circ_span += abs(gamma_wake[l]) * te['delta_y']
+        # Signed bound circulation * dy: Gamma_bound * dy = Gamma_wake * (p2.y - p1.y)
+        # preserves exact lift sign for positive and negative angles of attack
+        total_circ_span += gamma_wake[l] * (te['p2'][1] - te['p1'][1])
 
     Lift_KJ = rho_inf * V_inf_mag * total_circ_span
     CL_KJ = (2.0 / (V_inf_mag * S_ref)) * total_circ_span
 
     return Lift_KJ, CL_KJ
+
+
+# =============================================================================
+# S13b. TREFFTZ-PLANE FAR-FIELD INDUCED DRAG
+# =============================================================================
+
+def trefftz_plane_induced_drag(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.225):
+    """Compute induced drag via far-field Trefftz-plane wake integration.
+    (Katz & Plotkin §8.4 Eq. 8.146; §12.1 Eq. 12.10a; §12.3 p. 347)
+
+    Evaluates the downwash at each wake strip midpoint ym_i induced by all
+    semi-infinite trailing vortex pairs and integrates:
+        D_KJ = rho_inf * sum_i G_bound,i * w_wing,i * dy_i
+        CD_KJ = D_KJ / (q_inf * S_ref)
+
+    Parameters:
+        gamma_wake:  (p,) ndarray of solved wake circulations
+        te_segments: list of trailing edge segment dictionaries
+        V_inf_mag:   float, freestream velocity magnitude
+        S_ref:       float, reference wing area
+        rho_inf:     float, freestream density
+
+    Returns:
+        Drag_KJ: float, Trefftz-plane induced drag force (N)
+        CD_KJ:   float, Trefftz-plane induced drag coefficient
+    """
+    p = len(te_segments)
+    if p == 0:
+        return 0.0, 0.0
+
+    y1 = np.array([min(te['p1'][1], te['p2'][1]) for te in te_segments], dtype=float)
+    y2 = np.array([max(te['p1'][1], te['p2'][1]) for te in te_segments], dtype=float)
+    ym = 0.5 * (y1 + y2)
+    dy = y2 - y1
+
+    # Signed bound circulation (+ for upward lift): Gamma_bound = gamma_wake * sign(p2.y - p1.y)
+    signs = np.array([1.0 if te['p2'][1] >= te['p1'][1] else -1.0 for te in te_segments], dtype=float)
+    G_bound = np.asarray(gamma_wake, dtype=float) * signs
+
+    # Downwash at each wake strip midpoint ym_i (positive downward):
+    # w_wing,i = (1 / 4*pi) * sum_j G_bound_j * [1/(ym_i - y1_j) - 1/(ym_i - y2_j)]
+    d1 = ym[:, None] - y1[None, :]
+    d2 = ym[:, None] - y2[None, :]
+    inv1 = np.where(np.abs(d1) > 1e-12, 1.0 / np.where(np.abs(d1) > 1e-12, d1, 1.0), 0.0)
+    inv2 = np.where(np.abs(d2) > 1e-12, 1.0 / np.where(np.abs(d2) > 1e-12, d2, 1.0), 0.0)
+    w_wing = (1.0 / (4.0 * math.pi)) * ((inv1 - inv2) @ G_bound)
+
+    Drag_KJ = float(rho_inf * np.sum(G_bound * w_wing * dy))
+    q_inf = 0.5 * rho_inf * (V_inf_mag ** 2)
+    CD_KJ = Drag_KJ / (q_inf * S_ref)
+    return Drag_KJ, CD_KJ
 
 
 # =============================================================================
@@ -1269,7 +1347,7 @@ def evaluate_flow_field_velocity(r_eval, vertices, faces, te_segments,
                                  gamma_panels, gamma_wake, V_inf_vec,
                                  core_radius=1e-8):
     """Compute potential flow velocity at an arbitrary 3D spatial field point.
-    (Hunsaker Sandia Report Eqs. 8 & 10; Katz & Plotkin §12.2)
+    (Hunsaker Sandia Report Eqs. 2, 3, 9 & 10; Katz & Plotkin §12.1 Eq. 12.4a & §12.3 Eq. 12.16)
 
     Evaluates:
         V(r) = V_inf + sum_{j=1}^m Gamma_j * v_ring,j(r) + sum_{l=1}^p Gamma_{w,l} * w_wake,l(r)
@@ -1340,22 +1418,22 @@ def evaluate_flow_field_velocity(r_eval, vertices, faces, te_segments,
 
 def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
                            centroids=None, normals=None, areas=None,
-                           pin_panel_idx=0, core_radius=1e-8, n_neighbors=6,
+                           pin_panel_idx=0, core_radius=1e-8, n_neighbors=12,
                            verbose=True):
     """Master high-level driver that executes the complete 3D potential flow solve.
     (Hunsaker Sandia Report Complete Workflow; Katz & Plotkin Chapter 12)
 
-    Executes Steps S1 through S13:
-        1. S1:  Compute panel centroids, outward normals, and areas (unless provided).
-        2. S5:  Find trailing edge segments (if not explicitly provided).
-        3. S6:  Assemble influence matrix [A] (tangency + Kutta + rank pinning).
-        4. S7:  Build RHS vector {b}.
-        5. S8:  Solve overdetermined linear system for panel and wake circulations.
-        6. S9:  Compute centroid induced velocities.
-        7. S10: Compute surface velocity jump via local least-squares gradient.
-        8. S11: Compute surface pressure coefficient distribution Cp.
-        9. S12: Integrate surface pressures for CL, CD_press, CS, and moments.
-        10. S13: Compute far-field Kutta-Joukowski lift verification.
+    Executes Steps S1 through S13b:
+        1. S1:   Compute panel centroids, outward normals, and areas (unless provided).
+        2. S5:   Find trailing edge segments (if not explicitly provided).
+        3. S6:   Assemble influence matrix [A] (tangency + Kutta + rank pinning).
+        4. S7:   Build RHS vector {b}.
+        5. S8:   Solve overdetermined linear system for panel and wake circulations.
+        6. S9:   Compute centroid induced velocities.
+        7. S10:  Compute surface velocity jump via local least-squares gradient.
+        8. S11:  Compute surface pressure coefficient distribution Cp.
+        9. S12:  Integrate surface pressures for CL, CD_press, CS, and moments.
+        10. S13/b: Compute far-field Kutta-Joukowski lift and Trefftz-plane drag.
 
     Parameters:
         vertices:       (n_v, 3) ndarray of mesh vertices
@@ -1371,7 +1449,7 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
         areas:          (m,) optional precomputed panel areas
         pin_panel_idx:  int, index of panel pinned to zero circulation (default 0)
         core_radius:    float, vortex core cutoff radius (default 1e-8)
-        n_neighbors:    int, neighbor count for local gradient fit (default 6)
+        n_neighbors:    int, neighbor count for local gradient fit (default 12)
         verbose:        bool, print status banners to terminal
 
     Returns:
@@ -1388,6 +1466,8 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
                   'forces': dict from integrate_surface_forces
                   'Lift_KJ': float
                   'CL_KJ': float
+                  'Drag_KJ': float
+                  'CD_KJ': float
                   'residuals': residual norm
     """
     if verbose:
@@ -1481,8 +1561,9 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
                                      S_ref, b_ref, c_ref, r_ref=r_ref,
                                      rho_inf=rho_inf, V_inf_mag=V_inf_mag)
 
-    # 10. Trefftz-Plane / Kutta-Joukowski Lift (S13)
+    # 10. Trefftz-Plane / Kutta-Joukowski Lift & Induced Drag (S13, S13b)
     Lift_KJ, CL_KJ = kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=rho_inf)
+    Drag_KJ, CD_KJ = trefftz_plane_induced_drag(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=rho_inf)
 
     if verbose:
         print("-" * 80)
@@ -1492,6 +1573,7 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
         print(f"    Trefftz-Plane Wake Lift:   CL = {CL_KJ:.4f}  (Lift = {Lift_KJ:.2f} N)")
         print(f"    Lift Agreement Delta:      abs(CL_press - CL_KJ) = {abs(forces['CL'] - CL_KJ):.5f}")
         print(f"    Pressure Induced Drag:     CD = {forces['CD_press']:.5f}")
+        print(f"    Trefftz-Plane Wake Drag:   CD = {CD_KJ:.5f}  (Drag = {Drag_KJ:.2f} N)")
         print(f"    Pitching Moment (Cm_y):    Cm = {forces['Cm_y']:.4f}")
         print("=" * 80)
 
@@ -1508,6 +1590,8 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
         'forces': forces,
         'Lift_KJ': Lift_KJ,
         'CL_KJ': CL_KJ,
+        'Drag_KJ': Drag_KJ,
+        'CD_KJ': CD_KJ,
         'residuals': residuals
     }
 
@@ -1517,7 +1601,7 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
 # =============================================================================
 
 def solve_from_mesh(mesh, input_data, te_segments=None, pin_panel_idx=0,
-                    core_radius=1e-8, n_neighbors=6, verbose=True):
+                    core_radius=1e-8, n_neighbors=12, verbose=True):
     """High-level functional wrapper accepting Jeremy's src.mesh.Mesh object
     and the parsed input.json configuration dictionary.
 
@@ -1573,7 +1657,7 @@ class Solver:
 
     def __init__(self, mesh, wake, V_inf=None, S_ref=None, c_ref=None, b_ref=None,
                  r_ref=None, rho_inf=1.225, pin_panel_idx=0, core_radius=1e-8,
-                 n_neighbors=6):
+                 n_neighbors=12):
         self.mesh = mesh
         self.wake = wake if wake is not None else []
         self.rho_inf = float(rho_inf)
@@ -1625,6 +1709,8 @@ class Solver:
         self.forces = None
         self.Lift_KJ = None
         self.CL_KJ = None
+        self.Drag_KJ = None
+        self.CD_KJ = None
         self.residuals = None
 
     def _set_freestream(self, V_inf):
@@ -1711,6 +1797,13 @@ class Solver:
             self.S_ref,
             rho_inf=self.rho_inf,
         )
+        self.Drag_KJ, self.CD_KJ = trefftz_plane_induced_drag(
+            self.gamma_wake,
+            self.te_segments,
+            self.V_inf_mag,
+            self.S_ref,
+            rho_inf=self.rho_inf,
+        )
 
         if verbose:
             print("-" * 80)
@@ -1719,6 +1812,7 @@ class Solver:
             print(f"    Surface Integrated Lift:   CL = {self.forces['CL']:.4f}")
             print(f"    Trefftz-Plane Wake Lift:   CL = {self.CL_KJ:.4f}")
             print(f"    Pressure Induced Drag:     CD = {self.forces['CD_press']:.5f}")
+            print(f"    Trefftz-Plane Wake Drag:   CD = {self.CD_KJ:.5f}")
             print(f"    Pitching Moment (Cm_y):    Cm = {self.forces['Cm_y']:.4f}")
             print("-" * 80)
 
@@ -1752,6 +1846,8 @@ class Solver:
             "forces": self.forces,
             "Lift_KJ": self.Lift_KJ,
             "CL_KJ": self.CL_KJ,
+            "Drag_KJ": self.Drag_KJ,
+            "CD_KJ": self.CD_KJ,
             "residuals": self.residuals,
         }
 
