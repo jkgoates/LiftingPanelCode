@@ -78,6 +78,13 @@ class ExportTests(unittest.TestCase):
         np.testing.assert_allclose(self.read_scalar(rest, "gamma_wake"), self.solution["gamma_wake"],
                                    rtol=1e-6, atol=1e-9)
 
+    def test_wake_vtk_has_the_shed_vorticity(self):
+        path = self.folder / "wake.vtk"
+        postprocess.write_wake_vtk(str(path), self.solver, self.solution, 5.0)
+        points, cells, rest = self.read_vtk(path)
+        np.testing.assert_allclose(self.read_scalar(rest, "gamma_shed"), self.solution["gamma_shed"],
+                                   rtol=1e-6, atol=1e-9)
+
     def test_report_repeats_the_solver_numbers(self):
         path = self.folder / "report.json"
         postprocess.write_report(str(path), WING, self.solver, self.solution)
