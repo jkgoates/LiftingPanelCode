@@ -55,8 +55,9 @@ S10     compute_surface_velocity_jump()     Hunsaker Eq.16, C1-C5  Local least-s
 S11     compute_pressure_coefficients()     Hunsaker Eq. 15        Surface Cp via Bernoulli equation
 S12     integrate_surface_forces()          Hunsaker p.13, K&P 12  Surface pressure force & moment integration (CL, CD, CS)
 S13     kutta_joukowski_lift()              K&P Eqs. 8.147, 12.9   Far-field Trefftz plane wake lift verification
-S13b    trefftz_plane_induced_drag()        K&P 8.146, 12.10a      Far-field Trefftz-plane wake induced drag (CD_KJ)
-S14     evaluate_flow_field_velocity()      Hunsaker Eqs. 2, 9, 10 Velocity query at arbitrary 3D points (for streamlines)
+S13b    trefftz_plane_induced_drag()        K&P 8.146, 12.10a      Far-field 2D Trefftz-plane wake induced drag (CD_KJ)
+S13c    compute_shed_trailing_vorticity()   Helmholtz Theorem      Spanwise shed trailing vorticity (-dGamma/ds)
+S14     evaluate_flow_field_velocities()    Hunsaker Eqs. 2, 9, 10 Velocity query at 3D points (scalar & batch streamlines)
 S15     system_setup_and_solve()            Workflow Master        End-to-end driver: mesh & flight op -> full solution dict
 S16     solve_from_mesh()                   src/ Integration       Direct driver for src.mesh.Mesh & input.json config
 S17     Solver (class)                      src/main.py Interface  Object-oriented wrapper matching main.py Solver(mesh, wake)
@@ -177,6 +178,11 @@ def match_wake_to_panels(vertices, faces, wake):
     for hs in wake:
         p1 = np.asarray(hs.v0, dtype=float)
         p2 = np.asarray(hs.v1, dtype=float)
+        # Canonicalize bound segment direction (+y, or +z for vertical tails/winglets)
+        # so gamma_wake maintains a uniform sign across the entire span
+        if (p2[1] < p1[1] - 1e-12) or (abs(p2[1] - p1[1]) <= 1e-12 and p2[2] < p1[2]):
+            p1, p2 = p2, p1
+
         i0 = int(np.argmin(np.linalg.norm(vertices - p1, axis=1)))
         i1 = int(np.argmin(np.linalg.norm(vertices - p2, axis=1)))
         key = (min(i0, i1), max(i0, i1))
@@ -442,28 +448,31 @@ def trailing_horseshoe_velocity(p1, p2, u_inf, r_eval, core_radius=1e-8):
 # =============================================================================
 
 def find_trailing_edge_segments(vertices, faces, centroids, normals,
-                                aft_fraction=0.5, max_cos_angle=0.2):
+                                aft_fraction=None, max_cos_angle=-0.5,
+                                flow_direction=None):
     """Identify sharp trailing-edge segments where upper and lower panels meet.
     (Hunsaker Sandia Report "Lifting Bodies", pp. 7 - 9; Katz & Plotkin §12.3 & §12.5, Eq. 12.33)
 
-    Finds topological surface edges that meet three criteria:
+    Finds topological surface edges that meet four criteria:
         1. Shared by exactly two facets (internal surface edge)
-        2. Aft of aft_fraction * x_max (trailing-edge region)
-        3. Sharp angle between surface normals: dot(n_upper, n_lower) < max_cos_angle
-        4. Spanwise oriented: abs(y2 - y1) > 1e-4 (avoids chordwise tip-cap edges)
+        2. Locally downstream of both adjacent panel centroids along flow_direction
+           (supports arbitrary wing sweep; optional global aft_fraction x filter)
+        3. Sharp angle between surface normals: dot(n_upper, n_lower) <= max_cos_angle
+        4. Significant cross-stream extent: ||(p2 - p1) x u_dir|| > 1e-4
 
     Parameters:
-        vertices:      (n_v, 3) ndarray of vertex coordinates
-        faces:         (n_f, 3) ndarray of face vertex indices
-        centroids:     (n_f, 3) ndarray of panel centroids
-        normals:       (n_f, 3) ndarray of panel outward normals
-        aft_fraction:  float, minimum normalized x/x_max location
-        max_cos_angle: float, maximum normal dot product for sharp TE classification
+        vertices:       (n_v, 3) ndarray of vertex coordinates
+        faces:          (n_f, 3) ndarray of face vertex indices
+        centroids:      (n_f, 3) ndarray of panel centroids
+        normals:        (n_f, 3) ndarray of panel outward normals
+        aft_fraction:   optional float in [0, 1], global minimum normalized x/x_max
+        max_cos_angle:  float, maximum normal dot product for sharp TE (default: -0.5, >= 120 deg)
+        flow_direction: optional (3,) freestream direction vector (default: [1, 0, 0])
 
     Returns:
         te_segments: list of dicts, each containing:
-                     'upper_panel': index of upper panel
-                     'lower_panel': index of lower panel
+                     'upper_panel': panel index traversing edge same way as p1 -> p2
+                     'lower_panel': panel index traversing edge opposite to p1 -> p2
                      'p1': (3,) ndarray start of bound segment
                      'p2': (3,) ndarray end of bound segment
                      'delta_y': float spanwise width
@@ -472,9 +481,18 @@ def find_trailing_edge_segments(vertices, faces, centroids, normals,
     centroids = np.asarray(centroids, dtype=float)
     normals = np.asarray(normals, dtype=float)
 
-    x_max = np.max(vertices[:, 0])
-    x_min = np.min(vertices[:, 0])
-    x_threshold = x_min + aft_fraction * (x_max - x_min)
+    if flow_direction is None:
+        u_dir = np.array([1.0, 0.0, 0.0], dtype=float)
+    else:
+        u_dir = np.asarray(flow_direction, dtype=float)
+        u_norm = float(np.linalg.norm(u_dir))
+        u_dir = u_dir / u_norm if u_norm > 1e-14 else np.array([1.0, 0.0, 0.0], dtype=float)
+
+    x_threshold = None
+    if aft_fraction is not None:
+        x_max = np.max(vertices[:, 0])
+        x_min = np.min(vertices[:, 0])
+        x_threshold = x_min + float(aft_fraction) * (x_max - x_min)
 
     # Build half-edge dictionary: edge_key -> list of (face_idx, directed_p1, directed_p2)
     edge_map = {}
@@ -500,46 +518,54 @@ def find_trailing_edge_segments(vertices, faces, centroids, normals,
         p2 = vertices[key[1]]
         mid_edge = 0.5 * (p1 + p2)
 
-        # Aft check
-        if mid_edge[0] < x_threshold:
+        # Optional global aft check
+        if x_threshold is not None and mid_edge[0] < x_threshold:
             continue
 
-        # Spanwise width check (must have spanwise extent, not pure chordwise)
-        delta_y = abs(p2[1] - p1[1])
-        if delta_y < 1e-4:
+        edge_vec = p2 - p1
+        edge_len = float(np.linalg.norm(edge_vec))
+        if edge_len < 1e-12:
+            continue
+        e_hat = edge_vec / edge_len
+
+        # Cross-stream extent check (rejects pure streamwise edges, allows vertical fins/winglets)
+        u_perp = u_dir - float(np.dot(u_dir, e_hat)) * e_hat
+        if float(np.linalg.norm(u_perp)) * edge_len < 1e-4:
+            continue
+
+        # Local downstream check perpendicular to edge (invariant to arbitrary wing sweep/taper)
+        if (np.dot(mid_edge - centroids[f_A], u_perp) <= 0.0 or
+                np.dot(mid_edge - centroids[f_B], u_perp) <= 0.0):
             continue
 
         # Sharpness check
-        cos_norm = np.dot(normals[f_A], normals[f_B])
+        cos_norm = float(np.dot(normals[f_A], normals[f_B]))
         if cos_norm > max_cos_angle:
             continue
 
-        # Differentiate upper vs lower by normal z-component
-        if normals[f_A, 2] >= normals[f_B, 2]:
-            upper_idx = f_A
-            lower_idx = f_B
-            p_start = vertices[i1_A]
-            p_end = vertices[i2_A]
-        else:
-            upper_idx = f_B
-            lower_idx = f_A
-            p_start = vertices[i1_B]
-            p_end = vertices[i2_B]
-
-        # Ensure p1 -> p2 points along positive y (port to starboard) for bound vortex orientation
-        if p_end[1] < p_start[1]:
+        # Canonical bound orientation: p_start -> p_end in +y (or +z if vertical)
+        i_start, i_end = key[0], key[1]
+        p_start, p_end = vertices[i_start], vertices[i_end]
+        if (p_end[1] < p_start[1] - 1e-12) or (abs(p_end[1] - p_start[1]) <= 1e-12 and p_end[2] < p_start[2]):
+            i_start, i_end = i_end, i_start
             p_start, p_end = p_end, p_start
+
+        # Pair panel_a as whichever adjacent facet traverses i_start -> i_end in the same direction
+        if i1_A == i_start and i2_A == i_end:
+            upper_idx, lower_idx = f_A, f_B
+        else:
+            upper_idx, lower_idx = f_B, f_A
 
         te_segments.append({
             'upper_panel': upper_idx,
             'lower_panel': lower_idx,
             'p1': p_start,
             'p2': p_end,
-            'delta_y': delta_y
+            'delta_y': abs(float(p_end[1] - p_start[1]))
         })
 
     # Sort trailing edges by spanwise coordinate
-    te_segments.sort(key=lambda te: 0.5 * (te['p1'][1] + te['p2'][1]))
+    te_segments.sort(key=lambda te: (0.5 * (te['p1'][1] + te['p2'][1]), 0.5 * (te['p1'][2] + te['p2'][2])))
     return te_segments
 
 
@@ -1252,18 +1278,47 @@ def integrate_surface_forces(Cp, areas, normals, centroids, alpha_rad, beta_rad,
 # S13. TREFFTZ-PLANE / KUTTA-JOUKOWSKI FAR-FIELD LIFT VERIFICATION
 # =============================================================================
 
-def kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.225):
+def _wind_axes_triad(V_inf_vec=None):
+    """Return right-handed wind-axis unit triad (e_D, e_S, e_L) matching S12."""
+    if V_inf_vec is None:
+        return (
+            np.array([1.0, 0.0, 0.0], dtype=float),
+            np.array([0.0, 1.0, 0.0], dtype=float),
+            np.array([0.0, 0.0, 1.0], dtype=float),
+        )
+    v = np.asarray(V_inf_vec, dtype=float)
+    v_mag = float(np.linalg.norm(v))
+    if v_mag < 1e-14:
+        return (
+            np.array([1.0, 0.0, 0.0], dtype=float),
+            np.array([0.0, 1.0, 0.0], dtype=float),
+            np.array([0.0, 0.0, 1.0], dtype=float),
+        )
+    e_D = v / v_mag
+    alpha_rad = math.atan2(v[2], v[0])
+    e_L = np.array([-math.sin(alpha_rad), 0.0, math.cos(alpha_rad)], dtype=float)
+    e_S = np.cross(e_L, e_D)
+    s_norm = float(np.linalg.norm(e_S))
+    if s_norm > 1e-14:
+        e_S /= s_norm
+    else:
+        e_S = np.array([0.0, 1.0, 0.0], dtype=float)
+    return e_D, e_S, e_L
+
+
+def kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.225,
+                         V_inf_vec=None):
     """Compute total lift using the far-field Trefftz-plane Kutta-Joukowski theorem.
     (Katz & Plotkin §8.4 Eq. 8.147 & §12.1 Eq. 12.9)
 
     Theoretical Context:
-        Far downstream in the Trefftz plane, the net vertical momentum flux
-        carried by the trailing horseshoe vortices matches the bound circulation:
-            L_KJ = rho_inf * V_inf * sum_{l=1}^p Gamma_{w,l} * delta_y_l
-            CL_KJ = (2 / (V_inf * S_ref)) * sum_{l=1}^p Gamma_{w,l} * delta_y_l
+        Evaluates the 3D Kutta-Joukowski lift vector projected onto the wind lift axis:
+            L_KJ = rho_inf * sum_{l=1}^p Gamma_{w,l} * ((V_inf x ds_l) . e_L)
+                 = rho_inf * V_inf * sum_{l=1}^p Gamma_{w,l} * (ds_l . e_S)
+            CL_KJ = L_KJ / (q_inf * S_ref)
 
-        Comparing CL_KJ to the surface-pressure integrated CL provides an essential
-        independent consistency check on mesh discretization and solver convergence.
+        Handles arbitrary wing sweep, dihedral, angle of attack, and sideslip,
+        reducing to rho_inf * V_inf * sum Gamma_{w,l} * (p2.y - p1.y) when beta = 0.
 
     Parameters:
         gamma_wake:  (p,) ndarray of solved wake circulations
@@ -1271,16 +1326,17 @@ def kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.22
         V_inf_mag:   float, freestream velocity magnitude
         S_ref:       float, reference wing area
         rho_inf:     float, freestream density
+        V_inf_vec:   optional (3,) freestream velocity vector for full 3D wind axes
 
     Returns:
         Lift_KJ: float, total lift force via Kutta-Joukowski (N)
         CL_KJ:   float, non-dimensional lift coefficient via Kutta-Joukowski
     """
+    _, e_S, _ = _wind_axes_triad(V_inf_vec)
     total_circ_span = 0.0
     for l, te in enumerate(te_segments):
-        # Signed bound circulation * dy: Gamma_bound * dy = Gamma_wake * (p2.y - p1.y)
-        # preserves exact lift sign for positive and negative angles of attack
-        total_circ_span += gamma_wake[l] * (te['p2'][1] - te['p1'][1])
+        ds = np.asarray(te['p2'], dtype=float) - np.asarray(te['p1'], dtype=float)
+        total_circ_span += float(gamma_wake[l]) * float(np.dot(ds, e_S))
 
     Lift_KJ = rho_inf * V_inf_mag * total_circ_span
     CL_KJ = (2.0 / (V_inf_mag * S_ref)) * total_circ_span
@@ -1292,14 +1348,18 @@ def kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.22
 # S13b. TREFFTZ-PLANE FAR-FIELD INDUCED DRAG
 # =============================================================================
 
-def trefftz_plane_induced_drag(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.225):
-    """Compute induced drag via far-field Trefftz-plane wake integration.
+def trefftz_plane_induced_drag(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=1.225,
+                               V_inf_vec=None):
+    """Compute induced drag via full 2D far-field Trefftz-plane wake integration.
     (Katz & Plotkin §8.4 Eq. 8.146; §12.1 Eq. 12.10a; §12.3 p. 347)
 
-    Evaluates the downwash at each wake strip midpoint ym_i induced by all
-    semi-infinite trailing vortex pairs and integrates:
-        D_KJ = rho_inf * sum_i G_bound,i * w_wing,i * dy_i
+    Projects each trailing-edge segment into the 2D Trefftz plane (eta, zeta)
+    normal to u_inf, evaluates the 2D wake-induced velocity from all semi-infinite
+    trailing vortex leg pairs at each wake strip midpoint, and integrates:
+        D_KJ = -(rho_inf / 2) * sum_i Gamma_{w,i} * (v_T,i . n_T,i) * dl_i
         CD_KJ = D_KJ / (q_inf * S_ref)
+
+    Supports non-planar wakes (dihedral, winglets, V-tails), sweep, and sideslip.
 
     Parameters:
         gamma_wake:  (p,) ndarray of solved wake circulations
@@ -1307,6 +1367,7 @@ def trefftz_plane_induced_drag(gamma_wake, te_segments, V_inf_mag, S_ref, rho_in
         V_inf_mag:   float, freestream velocity magnitude
         S_ref:       float, reference wing area
         rho_inf:     float, freestream density
+        V_inf_vec:   optional (3,) freestream velocity vector
 
     Returns:
         Drag_KJ: float, Trefftz-plane induced drag force (N)
@@ -1316,36 +1377,176 @@ def trefftz_plane_induced_drag(gamma_wake, te_segments, V_inf_mag, S_ref, rho_in
     if p == 0:
         return 0.0, 0.0
 
-    y1 = np.array([min(te['p1'][1], te['p2'][1]) for te in te_segments], dtype=float)
-    y2 = np.array([max(te['p1'][1], te['p2'][1]) for te in te_segments], dtype=float)
-    ym = 0.5 * (y1 + y2)
-    dy = y2 - y1
+    _, e_S, e_L = _wind_axes_triad(V_inf_vec)
+    P1 = np.array([te['p1'] for te in te_segments], dtype=float)
+    P2 = np.array([te['p2'] for te in te_segments], dtype=float)
 
-    # Signed bound circulation (+ for upward lift): Gamma_bound = gamma_wake * sign(p2.y - p1.y)
-    signs = np.array([1.0 if te['p2'][1] >= te['p1'][1] else -1.0 for te in te_segments], dtype=float)
-    G_bound = np.asarray(gamma_wake, dtype=float) * signs
+    eta1 = P1 @ e_S
+    zeta1 = P1 @ e_L
+    eta2 = P2 @ e_S
+    zeta2 = P2 @ e_L
 
-    # Downwash at each wake strip midpoint ym_i (positive downward):
-    # w_wing,i = (1 / 4*pi) * sum_j G_bound_j * [1/(ym_i - y1_j) - 1/(ym_i - y2_j)]
-    d1 = ym[:, None] - y1[None, :]
-    d2 = ym[:, None] - y2[None, :]
-    inv1 = np.where(np.abs(d1) > 1e-12, 1.0 / np.where(np.abs(d1) > 1e-12, d1, 1.0), 0.0)
-    inv2 = np.where(np.abs(d2) > 1e-12, 1.0 / np.where(np.abs(d2) > 1e-12, d2, 1.0), 0.0)
-    w_wing = (1.0 / (4.0 * math.pi)) * ((inv1 - inv2) @ G_bound)
+    eta_m = 0.5 * (eta1 + eta2)
+    zeta_m = 0.5 * (zeta1 + zeta2)
+    d_eta = eta2 - eta1
+    d_zeta = zeta2 - zeta1
 
-    Drag_KJ = float(rho_inf * np.sum(G_bound * w_wing * dy))
+    # 2D Trefftz-plane velocity at strip midpoint i from trailing vortex legs (leg 1: -Gamma, leg 2: +Gamma)
+    de1 = eta_m[:, None] - eta1[None, :]
+    dz1 = zeta_m[:, None] - zeta1[None, :]
+    de2 = eta_m[:, None] - eta2[None, :]
+    dz2 = zeta_m[:, None] - zeta2[None, :]
+
+    r1_sq = de1 * de1 + dz1 * dz1
+    r2_sq = de2 * de2 + dz2 * dz2
+    inv_r1_sq = np.where(r1_sq > 1e-24, 1.0 / np.where(r1_sq > 1e-24, r1_sq, 1.0), 0.0)
+    inv_r2_sq = np.where(r2_sq > 1e-24, 1.0 / np.where(r2_sq > 1e-24, r2_sq, 1.0), 0.0)
+
+    G = np.asarray(gamma_wake, dtype=float)
+    v_eta = (1.0 / (2.0 * math.pi)) * ((dz1 * inv_r1_sq - dz2 * inv_r2_sq) @ G)
+    v_zeta = (1.0 / (2.0 * math.pi)) * ((-de1 * inv_r1_sq + de2 * inv_r2_sq) @ G)
+
+    # Normal vector * segment length in Trefftz plane: e_D x ds = (-d_zeta, +d_eta)
+    Drag_KJ = float(-0.5 * rho_inf * np.sum(G * (-v_eta * d_zeta + v_zeta * d_eta)))
     q_inf = 0.5 * rho_inf * (V_inf_mag ** 2)
     CD_KJ = Drag_KJ / (q_inf * S_ref)
     return Drag_KJ, CD_KJ
 
 
 # =============================================================================
+# S13c. SPANWISE SHED TRAILING VORTICITY
+# =============================================================================
+
+def compute_shed_trailing_vorticity(gamma_wake, te_segments, V_inf_vec=None):
+    """Compute net shed trailing vorticity (-dGamma/ds) across the trailing edge.
+
+    Unlike bound circulation `gamma_wake` (which peaks at wing center and tapers
+    to zero at the tips), the shed trailing vorticity is near zero at the symmetry
+    plane of an untwisted wing and reaches maximum magnitude at the wingtips.
+
+    Parameters:
+        gamma_wake:  (p,) ndarray of solved wake circulations
+        te_segments: list of trailing edge segment dictionaries
+        V_inf_vec:   optional (3,) freestream velocity vector
+
+    Returns:
+        gamma_shed: (p,) ndarray ordered 1-to-1 with te_segments
+    """
+    p = len(te_segments)
+    if p == 0:
+        return np.zeros(0, dtype=float)
+    if p == 1:
+        return np.zeros(1, dtype=float)
+
+    _, e_S, _ = _wind_axes_triad(V_inf_vec)
+    P1 = np.array([te['p1'] for te in te_segments], dtype=float)
+    P2 = np.array([te['p2'] for te in te_segments], dtype=float)
+
+    eta1 = P1 @ e_S
+    eta2 = P2 @ e_S
+    eta_m = 0.5 * (eta1 + eta2)
+    d_eta = eta2 - eta1
+
+    G_b = np.asarray(gamma_wake, dtype=float) * np.where(d_eta >= 0.0, 1.0, -1.0)
+    order = np.argsort(eta_m)
+    eta_s = eta_m[order]
+    g_s = G_b[order]
+
+    gamma_shed_s = np.zeros(p, dtype=float)
+    for k in range(1, p - 1):
+        denom = eta_s[k + 1] - eta_s[k - 1]
+        gamma_shed_s[k] = -(g_s[k + 1] - g_s[k - 1]) / denom if abs(denom) > 1e-12 else 0.0
+
+    # Outer tip edges bound gamma -> 0 outside the wingtips
+    eta_left_tip = min(eta1[order[0]], eta2[order[0]])
+    denom_l = eta_s[1] - eta_left_tip
+    gamma_shed_s[0] = -(g_s[1] - 0.0) / denom_l if abs(denom_l) > 1e-12 else 0.0
+
+    eta_right_tip = max(eta1[order[-1]], eta2[order[-1]])
+    denom_r = eta_right_tip - eta_s[-2]
+    gamma_shed_s[-1] = -(0.0 - g_s[-2]) / denom_r if abs(denom_r) > 1e-12 else 0.0
+
+    gamma_shed = np.empty(p, dtype=float)
+    gamma_shed[order] = gamma_shed_s
+    return gamma_shed
+
+
+# =============================================================================
 # S14. FLOW-FIELD VELOCITY EVALUATION (STREAMLINE QUERY)
 # =============================================================================
 
+def evaluate_flow_field_velocities(r_eval_pts, vertices, faces, te_segments,
+                                   gamma_panels, gamma_wake, V_inf_vec,
+                                   core_radius=1e-8, chunk_size=128,
+                                   _cached_edges=None):
+    """Compute potential flow velocity at an array of 3D spatial field points.
+    (Hunsaker Sandia Report Eqs. 2, 3, 9 & 10; Katz & Plotkin §12.1 Eq. 12.4a & §12.3 Eq. 12.16)
+
+    Vectorized and chunked evaluation suitable for off-body streamline grids and
+    CSV point sets, accepting an optional precomputed ring-edge tuple.
+    """
+    r_arr = np.asarray(r_eval_pts, dtype=float)
+    if r_arr.size == 0:
+        return np.zeros((0, 3), dtype=float)
+    r_pts = r_arr.reshape(-1, 3)
+    n_pts = len(r_pts)
+
+    V_inf_arr = np.asarray(V_inf_vec, dtype=float)
+    u_inf = V_inf_arr / np.linalg.norm(V_inf_arr)
+
+    if _cached_edges is None:
+        P1, P2, edge_panel, _, k_sides = _extract_ring_edges(vertices, faces)
+    else:
+        P1, P2, edge_panel, _, k_sides = _cached_edges
+
+    edge_gamma = (
+        np.repeat(gamma_panels, k_sides)
+        if k_sides is not None
+        else gamma_panels[edge_panel]
+    )
+
+    cr2 = core_radius * core_radius
+    V_out = np.tile(V_inf_arr, (n_pts, 1))
+    has_wake = len(te_segments) > 0
+
+    for i0 in range(0, n_pts, chunk_size):
+        i1 = min(i0 + chunk_size, n_pts)
+        r_chunk = r_pts[i0:i1]
+
+        dx1 = r_chunk[:, 0:1] - P1[:, 0]
+        dy1 = r_chunk[:, 1:2] - P1[:, 1]
+        dz1 = r_chunk[:, 2:3] - P1[:, 2]
+        dx2 = r_chunk[:, 0:1] - P2[:, 0]
+        dy2 = r_chunk[:, 1:2] - P2[:, 1]
+        dz2 = r_chunk[:, 2:3] - P2[:, 2]
+
+        r1 = np.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1 + cr2)
+        r2 = np.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2 + cr2)
+
+        cx = dy1 * dz2 - dz1 * dy2
+        cy = dz1 * dx2 - dx1 * dz2
+        cz = dx1 * dy2 - dy1 * dx2
+        dot12 = dx1 * dx2 + dy1 * dy2 + dz1 * dz2
+        den = 4.0 * math.pi * r1 * r2 * (r1 * r2 + dot12)
+
+        ok = np.abs(den) > 1e-12
+        fac = np.zeros_like(den)
+        fac[ok] = (r1[ok] + r2[ok]) / den[ok]
+
+        V_out[i0:i1, 0] += (fac * cx) @ edge_gamma
+        V_out[i0:i1, 1] += (fac * cy) @ edge_gamma
+        V_out[i0:i1, 2] += (fac * cz) @ edge_gamma
+
+        if has_wake:
+            W = _horseshoe_influence_batch(r_chunk, te_segments, u_inf, core_radius=core_radius)
+            V_out[i0:i1] += np.einsum('blj,l->bj', W, gamma_wake)
+
+    return V_out
+
+
 def evaluate_flow_field_velocity(r_eval, vertices, faces, te_segments,
                                  gamma_panels, gamma_wake, V_inf_vec,
-                                 core_radius=1e-8):
+                                 core_radius=1e-8, _cached_edges=None):
     """Compute potential flow velocity at an arbitrary 3D spatial field point.
     (Hunsaker Sandia Report Eqs. 2, 3, 9 & 10; Katz & Plotkin §12.1 Eq. 12.4a & §12.3 Eq. 12.16)
 
@@ -1369,47 +1570,17 @@ def evaluate_flow_field_velocity(r_eval, vertices, faces, te_segments,
         V: (3,) ndarray of local velocity vector [vx, vy, vz]
     """
     r_pt = np.asarray(r_eval, dtype=float).reshape(1, 3)
-    u_inf = V_inf_vec / np.linalg.norm(V_inf_vec)
-
-    P1, P2, edge_panel, _, k_sides = _extract_ring_edges(vertices, faces)
-    edge_gamma = (
-        np.repeat(gamma_panels, k_sides)
-        if k_sides is not None
-        else gamma_panels[edge_panel]
-    )
-
-    dx1 = r_pt[:, 0:1] - P1[:, 0]
-    dy1 = r_pt[:, 1:2] - P1[:, 1]
-    dz1 = r_pt[:, 2:3] - P1[:, 2]
-    dx2 = r_pt[:, 0:1] - P2[:, 0]
-    dy2 = r_pt[:, 1:2] - P2[:, 1]
-    dz2 = r_pt[:, 2:3] - P2[:, 2]
-
-    cr2 = core_radius * core_radius
-    r1 = np.sqrt(dx1 * dx1 + dy1 * dy1 + dz1 * dz1 + cr2)
-    r2 = np.sqrt(dx2 * dx2 + dy2 * dy2 + dz2 * dz2 + cr2)
-
-    cx = dy1 * dz2 - dz1 * dy2
-    cy = dz1 * dx2 - dx1 * dz2
-    cz = dx1 * dy2 - dy1 * dx2
-    dot12 = dx1 * dx2 + dy1 * dy2 + dz1 * dz2
-    den = 4.0 * math.pi * r1 * r2 * (r1 * r2 + dot12)
-
-    ok = np.abs(den) > 1e-12
-    fac = np.zeros_like(den)
-    fac[ok] = (r1[ok] + r2[ok]) / den[ok]
-
-    V = np.array([
-        V_inf_vec[0] + float(((fac * cx) @ edge_gamma)[0]),
-        V_inf_vec[1] + float(((fac * cy) @ edge_gamma)[0]),
-        V_inf_vec[2] + float(((fac * cz) @ edge_gamma)[0]),
-    ], dtype=float)
-
-    if len(te_segments) > 0:
-        W = _horseshoe_influence_batch(r_pt, te_segments, u_inf, core_radius=core_radius)
-        V += W[0].T @ gamma_wake
-
-    return V
+    return evaluate_flow_field_velocities(
+        r_pt,
+        vertices,
+        faces,
+        te_segments,
+        gamma_panels,
+        gamma_wake,
+        V_inf_vec,
+        core_radius=core_radius,
+        _cached_edges=_cached_edges,
+    )[0]
 
 
 # =============================================================================
@@ -1433,7 +1604,7 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
         7. S10:  Compute surface velocity jump via local least-squares gradient.
         8. S11:  Compute surface pressure coefficient distribution Cp.
         9. S12:  Integrate surface pressures for CL, CD_press, CS, and moments.
-        10. S13/b: Compute far-field Kutta-Joukowski lift and Trefftz-plane drag.
+        10. S13-c: Compute Trefftz-plane KJ lift, induced drag, and shed vorticity.
 
     Parameters:
         vertices:       (n_v, 3) ndarray of mesh vertices
@@ -1460,6 +1631,7 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
                   'te_segments': list of p segments
                   'gamma_panels': ndarray (m,)
                   'gamma_wake': ndarray (p,)
+                  'gamma_shed': ndarray (p,)
                   'V_centroids': ndarray (m, 3)
                   'V_surf': ndarray (m, 3)
                   'Cp': ndarray (m,)
@@ -1518,7 +1690,9 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
 
     # 2. Trailing Edge Detection (S5)
     if te_segments is None:
-        te_segments = find_trailing_edge_segments(vertices, faces, centroids, normals)
+        te_segments = find_trailing_edge_segments(
+            vertices, faces, centroids, normals, flow_direction=u_inf
+        )
     p = len(te_segments)
     if verbose:
         print(f"  [S5] Trailing Edge: {p} trailing-edge segments identified for Kutta condition.")
@@ -1561,9 +1735,14 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
                                      S_ref, b_ref, c_ref, r_ref=r_ref,
                                      rho_inf=rho_inf, V_inf_mag=V_inf_mag)
 
-    # 10. Trefftz-Plane / Kutta-Joukowski Lift & Induced Drag (S13, S13b)
-    Lift_KJ, CL_KJ = kutta_joukowski_lift(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=rho_inf)
-    Drag_KJ, CD_KJ = trefftz_plane_induced_drag(gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=rho_inf)
+    # 10. Trefftz-Plane / Kutta-Joukowski Lift, Induced Drag & Shed Vorticity (S13 - S13c)
+    Lift_KJ, CL_KJ = kutta_joukowski_lift(
+        gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=rho_inf, V_inf_vec=V_inf_vec
+    )
+    Drag_KJ, CD_KJ = trefftz_plane_induced_drag(
+        gamma_wake, te_segments, V_inf_mag, S_ref, rho_inf=rho_inf, V_inf_vec=V_inf_vec
+    )
+    gamma_shed = compute_shed_trailing_vorticity(gamma_wake, te_segments, V_inf_vec=V_inf_vec)
 
     if verbose:
         print("-" * 80)
@@ -1584,6 +1763,7 @@ def system_setup_and_solve(vertices, faces, operating_cond, te_segments=None,
         'te_segments': te_segments,
         'gamma_panels': gamma_panels,
         'gamma_wake': gamma_wake,
+        'gamma_shed': gamma_shed,
         'V_centroids': V_centroids,
         'V_surf': V_surf,
         'Cp': Cp,
@@ -1626,6 +1806,10 @@ def solve_from_mesh(mesh, input_data, te_segments=None, pin_panel_idx=0,
     for key in ("S_ref", "c_ref", "b_ref"):
         if key in mesh_cfg:
             operating_cond[key] = mesh_cfg[key]
+    if "r_ref" in mesh_cfg and mesh_cfg["r_ref"] is not None:
+        operating_cond["ref_center"] = mesh_cfg["r_ref"]
+    if "rho_inf" in flow_cfg and flow_cfg["rho_inf"] is not None:
+        operating_cond["density"] = flow_cfg["rho_inf"]
 
     return system_setup_and_solve(
         vertices=mesh_data["vertices"],
@@ -1702,6 +1886,7 @@ class Solver:
         self.b = None
         self.gamma_panels = None
         self.gamma_wake = None
+        self.gamma_shed = None
         self.panel_strengths = None
         self.V_centroids = None
         self.V_surf = None
@@ -1712,6 +1897,7 @@ class Solver:
         self.Drag_KJ = None
         self.CD_KJ = None
         self.residuals = None
+        self._ring_edges = _extract_ring_edges(self.vertices, self.faces)
 
     def _set_freestream(self, V_inf):
         V_inf_vec = np.asarray(V_inf, dtype=float)
@@ -1796,6 +1982,7 @@ class Solver:
             self.V_inf_mag,
             self.S_ref,
             rho_inf=self.rho_inf,
+            V_inf_vec=self.V_inf_vec,
         )
         self.Drag_KJ, self.CD_KJ = trefftz_plane_induced_drag(
             self.gamma_wake,
@@ -1803,6 +1990,12 @@ class Solver:
             self.V_inf_mag,
             self.S_ref,
             rho_inf=self.rho_inf,
+            V_inf_vec=self.V_inf_vec,
+        )
+        self.gamma_shed = compute_shed_trailing_vorticity(
+            self.gamma_wake,
+            self.te_segments,
+            V_inf_vec=self.V_inf_vec,
         )
 
         if verbose:
@@ -1829,6 +2022,22 @@ class Solver:
             self.gamma_wake,
             self.V_inf_vec,
             core_radius=self.core_radius,
+            _cached_edges=self._ring_edges,
+        )
+
+    def evaluate_velocities(self, r_eval_pts, chunk_size=128):
+        """Evaluate total potential flow velocity at an array of 3D points (S14)."""
+        return evaluate_flow_field_velocities(
+            r_eval_pts,
+            self.vertices,
+            self.faces,
+            self.te_segments,
+            self.gamma_panels,
+            self.gamma_wake,
+            self.V_inf_vec,
+            core_radius=self.core_radius,
+            chunk_size=chunk_size,
+            _cached_edges=self._ring_edges,
         )
 
     def get_solution_dict(self):
@@ -1840,6 +2049,7 @@ class Solver:
             "te_segments": self.te_segments,
             "gamma_panels": self.gamma_panels,
             "gamma_wake": self.gamma_wake,
+            "gamma_shed": self.gamma_shed,
             "V_centroids": self.V_centroids,
             "V_surf": self.V_surf,
             "Cp": self.Cp,

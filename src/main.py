@@ -46,6 +46,8 @@ def main():
         S_ref=mesh_cfg.get("S_ref"),
         c_ref=mesh_cfg.get("c_ref"),
         b_ref=mesh_cfg.get("b_ref"),
+        r_ref=mesh_cfg.get("r_ref"),
+        rho_inf=flow_cfg.get("rho_inf", 1.225),
     )
 
     # Calculate Influence Matrix [A] and velocity influence tensor
@@ -59,12 +61,12 @@ def main():
     off_body_file = output_cfg.get("off_body_velocity_points")
     if off_body_file and os.path.exists(off_body_file):
         pts = np.loadtxt(off_body_file, delimiter=",", ndmin=2)
-        off_body_velocities = np.array([mySolver.evaluate_velocity(pt) for pt in pts])
+        off_body_velocities = mySolver.evaluate_velocities(pts)
         solution["off_body_points"] = pts
         solution["off_body_velocities"] = off_body_velocities
         print("Evaluated velocity at {0} off-body points.".format(len(pts)))
 
-    # Hand off `solution` (Cp, V_surf, forces, CL_KJ, gamma_panels, gamma_wake)
+    # Hand off `solution` (Cp, V_surf, forces, CL_KJ, CD_KJ, gamma_panels, gamma_wake, gamma_shed)
     # to post-processing/export (report.json, body.vtk, wake.vtk) and streamline plots.
     postprocess.export_solution(input_data, mySolver, solution)
 
