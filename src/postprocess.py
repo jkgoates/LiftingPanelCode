@@ -12,6 +12,20 @@ import numpy as np
 from mesh import Mesh
 from solver import Solver
 
+# Lift and drag are found two ways, and every output names them by the method:
+#   _surface  integrating the panel pressures over the wing surface (near field)
+#   _trefftz  from the wake circulation in the Trefftz plane far downstream (far field)
+# In potential flow the two should agree, so the convergence study tracks all four.
+CONVERGENCE_QUANTITIES = ["CL_surface", "CL_trefftz", "CD_surface", "CD_trefftz"]
+
+
+def coefficient_row(solver):
+    # the four lift and drag coefficients of a solved case, by method
+    return {"CL_surface": float(solver.forces["CL"]),
+            "CL_trefftz": float(solver.CL_KJ),
+            "CD_surface": float(solver.forces["CD_press"]),
+            "CD_trefftz": float(solver.CD_KJ)}
+
 
 def make_folder_for(path):
     # create the folder a file goes in, if it is not there yet
@@ -35,16 +49,18 @@ def write_report(path, mesh_file, solver, solution):
               "S_ref": float(solver.S_ref),
               "b_ref": float(solver.b_ref),
               "c_ref": float(solver.c_ref),
-              "coefficients": {"CL": float(forces["CL"]),
-                               "CL_KJ": float(solution["CL_KJ"]),
-                               "CD_press": float(forces["CD_press"]),
+              "coefficients": {"CL_surface": float(forces["CL"]),
+                               "CL_trefftz": float(solution["CL_KJ"]),
+                               "CD_surface": float(forces["CD_press"]),
+                               "CD_trefftz": float(solution["CD_KJ"]),
                                "CS": float(forces["CS"]),
                                "Cm_x": float(forces["Cm_x"]),
                                "Cm_y": float(forces["Cm_y"]),
                                "Cm_z": float(forces["Cm_z"])},
-              "forces": {"Lift": float(forces["Lift"]),
-                         "Lift_KJ": float(solution["Lift_KJ"]),
-                         "Drag": float(forces["Drag"]),
+              "forces": {"Lift_surface": float(forces["Lift"]),
+                         "Lift_trefftz": float(solution["Lift_KJ"]),
+                         "Drag_surface": float(forces["Drag"]),
+                         "Drag_trefftz": float(solution["Drag_KJ"]),
                          "SideForce": float(forces["SideForce"]),
                          "F_body": [float(v) for v in forces["F_body"]],
                          "M_body": [float(v) for v in forces["M_body"]]}}
@@ -209,21 +225,35 @@ def solve_for_convergence(mesh_file, input_data):
                     b_ref=mesh_cfg.get("b_ref"))
     solver.calculate_influence_matrix()
     solver.solve_panel_strengths(verbose=False)
-    return {"mesh": os.path.basename(str(mesh_file)),
-            "n_panels": int(mesh.N),
-            "CL": float(solver.forces["CL"]),
-            "CL_KJ": float(solver.CL_KJ),
-            "CD_press": float(solver.forces["CD_press"]),
-            "solve_time[s]": time.time() - start}
+    row = {"mesh": os.path.basename(str(mesh_file)), "n_panels": int(mesh.N)}
+    row.update(coefficient_row(solver))
+    row["solve_time[s]"] = time.time() - start
+    return row
+
+
+def rows_from_case_table(path):
+    # read an all_cases.csv (columns family, mesh, n_panels, CL, CL_KJ, CD_press, CD_KJ, ...) written by the
+    # wing-family runs and return {family: [convergence rows]}, so the convergence files can be rebuilt
+    # without solving again
+    families = {}
+    with open(path, newline="") as f:
+        for r in csv.DictReader(f):
+            row = {"mesh": r["mesh"], "n_panels": int(r["n_panels"]),
+                   "CL_surface": float(r["CL"]), "CL_trefftz": float(r["CL_KJ"]),
+                   "CD_surface": float(r["CD_press"]), "CD_trefftz": float(r["CD_KJ"])}
+            if r.get("solve_time[s]"):
+                row["solve_time[s]"] = float(r["solve_time[s]"])
+            families.setdefault(r["family"], []).append(row)
+    return families
 
 
 def convergence_table(rows):
-    # rows: one dictionary per mesh with "mesh", "n_panels", "CL", "CL_KJ", "CD_press".
+    # rows: one dictionary per mesh with "mesh", "n_panels" and the CONVERGENCE_QUANTITIES.
     # sorts coarsest first and adds the percent change of each from the finest mesh
     rows = sorted(rows, key=lambda r: r["n_panels"])
     finest = rows[-1]
     for r in rows:
-        for name in ["CL", "CL_KJ", "CD_press"]:
+        for name in CONVERGENCE_QUANTITIES:
             if finest[name] != 0.0:
                 r[name + "_change[%]"] = 100.0 * (r[name] - finest[name]) / abs(finest[name])
             else:
@@ -290,13 +320,13 @@ def order_of_convergence(n_panels, values):
 
 
 def convergence_summary(rows):
-    # order, extrapolation and GCI of CL, CL_KJ and CD_press from the three finest meshes in the table.
+    # order, extrapolation and GCI of the surface and Trefftz-plane CL and CD from the three finest meshes.
     # returns one dictionary per quantity, or an empty list with fewer than three meshes
     if len(rows) < 3:
         return []
     finest = sorted(rows, key=lambda r: r["n_panels"])[-3:]
     summary = []
-    for name in ["CL", "CL_KJ", "CD_press"]:
+    for name in CONVERGENCE_QUANTITIES:
         result = order_of_convergence([r["n_panels"] for r in finest], [r[name] for r in finest])
         result["quantity"] = name
         result["meshes"] = ", ".join(r["mesh"] for r in finest)
@@ -304,17 +334,30 @@ def convergence_summary(rows):
     return summary
 
 
+# Richardson extrapolation divides by (r^p - 1), which goes to zero as p does, so a small observed order
+# blows a small mesh-to-mesh change up into a meaningless value (p = 0.18 gave CD = -0.0246). Below this
+# order the meshes are not yet in the asymptotic range; the plot leaves such extrapolations out
+# (the summary CSV still lists them, with p, so the reason is visible).
+MIN_ORDER_TO_PLOT = 0.5
+
+
+def plotted_extrapolations(summary):
+    # the summary entries whose extrapolated value is drawn on the convergence plot
+    return [s for s in summary
+            if s["extrapolated"] is not None and s["p"] is not None and s["p"] >= MIN_ORDER_TO_PLOT]
+
+
 def print_convergence_summary(summary):
     # the summary as a small table in the terminal
     print("Grid convergence from the three finest meshes:")
-    print("  {0:<9} {1:<12} {2:>6} {3:>12} {4:>12} {5:>8}".format("quantity", "behaviour", "p", "fine mesh",
-                                                                  "extrapolated", "GCI[%]"))
+    print("  {0:<11} {1:<12} {2:>6} {3:>12} {4:>12} {5:>8}".format("quantity", "behaviour", "p", "fine mesh",
+                                                                   "extrapolated", "GCI[%]"))
     for s in summary:
         p = "" if s["p"] is None else "{0:.2f}".format(s["p"])
         ext = "" if s["extrapolated"] is None else "{0:.5f}".format(s["extrapolated"])
         gci = "" if s["GCI_fine[%]"] is None else "{0:.2f}".format(s["GCI_fine[%]"])
-        print("  {0:<9} {1:<12} {2:>6} {3:>12.5f} {4:>12} {5:>8}".format(s["quantity"], s["behaviour"], p,
-                                                                         s["fine_value"], ext, gci))
+        print("  {0:<11} {1:<12} {2:>6} {3:>12.5f} {4:>12} {5:>8}".format(s["quantity"], s["behaviour"], p,
+                                                                          s["fine_value"], ext, gci))
 
 
 def write_convergence(rows, csv_path, figure_path, summary_path=None):
@@ -324,7 +367,8 @@ def write_convergence(rows, csv_path, figure_path, summary_path=None):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    names = ["mesh", "n_panels", "CL", "CL_KJ", "CD_press", "CL_change[%]", "CL_KJ_change[%]", "CD_press_change[%]"]
+    names = (["mesh", "n_panels"] + CONVERGENCE_QUANTITIES
+             + [q + "_change[%]" for q in CONVERGENCE_QUANTITIES])
     # solve time is a column only when every mesh has one
     has_time = all("solve_time[s]" in r for r in rows)
     if has_time:
@@ -352,25 +396,24 @@ def write_convergence(rows, csv_path, figure_path, summary_path=None):
     if len(summary) > 0:
         print_convergence_summary(summary)
 
-    # plot: CL, CD and (if known) solve time against panel count
+    # plot: CL and CD by both methods, and (if known) solve time, against panel count
     n = [r["n_panels"] for r in rows]
     n_plots = 3 if has_time else 2
     fig, ax = plt.subplots(1, n_plots, figsize=(4.5 * n_plots, 3.6))
-    ax[0].plot(n, [r["CL"] for r in rows], "o-", label="surface pressure")
-    ax[0].plot(n, [r["CL_KJ"] for r in rows], "s--", label="Kutta-Joukowski")
-    ax[0].set_ylabel("CL")
-    ax[1].plot(n, [r["CD_press"] for r in rows], "o-", label="surface pressure")
-    ax[1].set_ylabel("CD (pressure)")
-    # extrapolated values as dotted lines, for results that converge monotonically
-    for s in summary:
-        if s["extrapolated"] is None:
-            continue
-        a = ax[1] if s["quantity"] == "CD_press" else ax[0]
-        a.axhline(s["extrapolated"], color="gray", linestyle=":", linewidth=1)
-        a.annotate("{0} extrapolated {1:.4f}".format(s["quantity"], s["extrapolated"]), (n[0], s["extrapolated"]),
-                   fontsize=7, color="gray", va="bottom")
-    ax[0].legend(fontsize=8)
+    methods = {"surface": ("o-", "C0", "surface pressure"), "trefftz": ("s--", "C1", "Trefftz plane")}
+    for a, coefficient in zip(ax[:2], ["CL", "CD"]):
+        for method, (style, color, label) in methods.items():
+            a.plot(n, [r[coefficient + "_" + method] for r in rows], style, color=color, label=label)
+        a.set_ylabel(coefficient)
+    # extrapolated values as dotted lines in the color of their method, for results that converge monotonically
+    # with order p >= MIN_ORDER_TO_PLOT; the value goes in the legend so no label sits on top of the data
+    for s in plotted_extrapolations(summary):
+        coefficient, method = s["quantity"].split("_")
+        a = ax[0] if coefficient == "CL" else ax[1]
+        a.axhline(s["extrapolated"], color=methods[method][1], linestyle=":", linewidth=1,
+                  label="{0} extrapolated {1:.4f}".format(methods[method][2], s["extrapolated"]))
     for a in ax[:2]:
+        a.legend(fontsize=7)
         a.set_xlabel("number of panels")
         a.set_xscale("log")
         a.grid(True)
@@ -381,7 +424,7 @@ def write_convergence(rows, csv_path, figure_path, summary_path=None):
         ax[2].set_xscale("log")
         ax[2].set_yscale("log")
         ax[2].grid(True, which="both")
-    fig.suptitle("Grid convergence")
+    fig.suptitle("Grid convergence: surface pressure vs Trefftz plane")
     fig.tight_layout()
     make_folder_for(figure_path)
     fig.savefig(figure_path, dpi=150)

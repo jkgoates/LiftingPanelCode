@@ -53,7 +53,7 @@ def main():
     # Calculate Influence Matrix [A] and velocity influence tensor
     mySolver.calculate_influence_matrix()
 
-    # Solve for panel & wake circulations, surface Cp, forces, and Kutta-Joukowski lift
+    # Solve for panel & wake circulations, surface Cp, surface forces, and Trefftz-plane lift and drag
     mySolver.solve_panel_strengths(verbose=True)
     solution = mySolver.get_solution_dict()
 
@@ -66,7 +66,8 @@ def main():
         solution["off_body_velocities"] = off_body_velocities
         print("Evaluated velocity at {0} off-body points.".format(len(pts)))
 
-    # Hand off `solution` (Cp, V_surf, forces, CL_KJ, CD_KJ, gamma_panels, gamma_wake, gamma_shed)
+    # Hand off `solution` (Cp, V_surf, surface forces, Trefftz-plane lift and drag, gamma_panels, gamma_wake,
+    # gamma_shed)
     # to post-processing/export (report.json, body.vtk, wake.vtk) and streamline plots.
     postprocess.export_solution(input_data, mySolver, solution)
 

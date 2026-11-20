@@ -85,9 +85,14 @@ class ExportTests(unittest.TestCase):
         self.assertEqual(report["n_panels"], self.n_panels)
         self.assertEqual(report["n_vertices"], self.n_vertices)
         self.assertEqual(report["n_wake_horseshoes"], self.n_wake)
-        self.assertAlmostEqual(report["coefficients"]["CL"], float(self.solution["forces"]["CL"]))
-        self.assertAlmostEqual(report["coefficients"]["CL_KJ"], float(self.solution["CL_KJ"]))
-        self.assertAlmostEqual(report["coefficients"]["CD_press"], float(self.solution["forces"]["CD_press"]))
+        coefficients = report["coefficients"]
+        self.assertAlmostEqual(coefficients["CL_surface"], float(self.solution["forces"]["CL"]))
+        self.assertAlmostEqual(coefficients["CD_surface"], float(self.solution["forces"]["CD_press"]))
+        self.assertAlmostEqual(coefficients["CL_trefftz"], float(self.solution["CL_KJ"]))
+        self.assertAlmostEqual(coefficients["CD_trefftz"], float(self.solution["CD_KJ"]))
+        self.assertAlmostEqual(report["forces"]["Drag_trefftz"], float(self.solution["Drag_KJ"]))
+        # only surface / Trefftz-plane names in the report
+        self.assertNotIn("KJ", json.dumps(report))
         self.assertEqual(len(report["forces"]["F_body"]), 3)
 
     def test_off_body_csv_has_a_header_and_one_row_per_point(self):
@@ -148,16 +153,28 @@ class ExportTests(unittest.TestCase):
         self.assertTrue((self.folder / "field.vtk").exists())
 
 
+def mesh_row(mesh, n_panels, CL_surface, CL_trefftz, CD_surface, CD_trefftz, **extra):
+    # one row of the convergence table, as the solver runs produce it
+    row = {"mesh": mesh, "n_panels": n_panels, "CL_surface": CL_surface, "CL_trefftz": CL_trefftz,
+           "CD_surface": CD_surface, "CD_trefftz": CD_trefftz}
+    row.update(extra)
+    return row
+
+
 class ConvergenceTests(unittest.TestCase):
+    def test_quantities_are_surface_and_trefftz_lift_and_drag(self):
+        self.assertEqual(postprocess.CONVERGENCE_QUANTITIES, ["CL_surface", "CL_trefftz", "CD_surface", "CD_trefftz"])
+
     def test_table_is_sorted_and_measured_from_the_finest_mesh(self):
-        rows = [{"mesh": "fine", "n_panels": 400, "CL": 0.50, "CL_KJ": 0.40, "CD_press": 0.010},
-                {"mesh": "coarse", "n_panels": 100, "CL": 0.45, "CL_KJ": 0.44, "CD_press": 0.012}]
+        rows = [mesh_row("fine", 400, 0.50, 0.40, 0.010, 0.0080),
+                mesh_row("coarse", 100, 0.45, 0.44, 0.012, 0.0070)]
         rows = postprocess.convergence_table(rows)
         self.assertEqual([r["mesh"] for r in rows], ["coarse", "fine"])
-        self.assertAlmostEqual(rows[0]["CL_change[%]"], -10.0)
-        self.assertAlmostEqual(rows[0]["CL_KJ_change[%]"], 10.0)
-        self.assertAlmostEqual(rows[0]["CD_press_change[%]"], 20.0)
-        self.assertAlmostEqual(rows[1]["CL_change[%]"], 0.0)
+        self.assertAlmostEqual(rows[0]["CL_surface_change[%]"], -10.0)
+        self.assertAlmostEqual(rows[0]["CL_trefftz_change[%]"], 10.0)
+        self.assertAlmostEqual(rows[0]["CD_surface_change[%]"], 20.0)
+        self.assertAlmostEqual(rows[0]["CD_trefftz_change[%]"], -12.5)
+        self.assertAlmostEqual(rows[1]["CL_surface_change[%]"], 0.0)
 
     def test_one_mesh_row_matches_a_direct_solve(self):
         input_data = {"mesh": {"filename": str(WING), "S_ref": 1.0, "c_ref": 1.0},
@@ -165,9 +182,17 @@ class ConvergenceTests(unittest.TestCase):
         row = postprocess.solve_for_convergence(WING, input_data)
         self.assertEqual(row["mesh"], "wing_RA10_coarse.stl")
         self.assertEqual(row["n_panels"], Mesh(WING).N)
-        for name in ["CL", "CL_KJ", "CD_press"]:
+        for name in postprocess.CONVERGENCE_QUANTITIES:
             self.assertTrue(np.isfinite(row[name]))
         self.assertGreater(row["solve_time[s]"], 0.0)
+
+    def test_coefficient_row_takes_surface_and_trefftz_values_from_the_solver(self):
+        class FakeSolver:
+            forces = {"CL": 0.45, "CD_press": 0.009}
+            CL_KJ = 0.46
+            CD_KJ = 0.0068
+        row = postprocess.coefficient_row(FakeSolver())
+        self.assertEqual(row, {"CL_surface": 0.45, "CL_trefftz": 0.46, "CD_surface": 0.009, "CD_trefftz": 0.0068})
 
 
 class OrderOfConvergenceTests(unittest.TestCase):
@@ -211,12 +236,12 @@ class OrderOfConvergenceTests(unittest.TestCase):
         self.assertIsNone(result["extrapolated"])
 
     def test_summary_uses_the_three_finest_meshes(self):
-        rows = [{"mesh": "a", "n_panels": 272, "CL": 0.38, "CL_KJ": 0.46, "CD_press": 0.05},
-                {"mesh": "b", "n_panels": 864, "CL": 0.42, "CL_KJ": 0.459, "CD_press": 0.03},
-                {"mesh": "c", "n_panels": 3344, "CL": 0.45, "CL_KJ": 0.4595, "CD_press": 0.01},
-                {"mesh": "d", "n_panels": 13104, "CL": 0.46, "CL_KJ": 0.4600, "CD_press": 0.008}]
+        rows = [mesh_row("a", 272, 0.38, 0.46, 0.05, 0.0078),
+                mesh_row("b", 864, 0.42, 0.459, 0.03, 0.0068),
+                mesh_row("c", 3344, 0.45, 0.4595, 0.01, 0.00675),
+                mesh_row("d", 13104, 0.46, 0.4600, 0.008, 0.0068)]
         summary = postprocess.convergence_summary(rows)
-        self.assertEqual([s["quantity"] for s in summary], ["CL", "CL_KJ", "CD_press"])
+        self.assertEqual([s["quantity"] for s in summary], ["CL_surface", "CL_trefftz", "CD_surface", "CD_trefftz"])
         for s in summary:
             self.assertEqual(s["meshes"], "b, c, d")
         # fewer than three meshes: no summary
@@ -224,21 +249,52 @@ class OrderOfConvergenceTests(unittest.TestCase):
 
     def test_write_convergence_writes_the_table_summary_and_plot(self):
         folder = Path(tempfile.mkdtemp())
-        rows = [{"mesh": "a", "n_panels": 272, "CL": 0.4272, "CL_KJ": 0.46, "CD_press": 0.05, "solve_time[s]": 1.0},
-                {"mesh": "b", "n_panels": 864, "CL": 0.44856, "CL_KJ": 0.459, "CD_press": 0.03, "solve_time[s]": 9.0},
-                {"mesh": "c", "n_panels": 3344, "CL": 0.46088, "CL_KJ": 0.4595, "CD_press": 0.01, "solve_time[s]": 99.0}]
+        rows = [mesh_row("a", 272, 0.4272, 0.46, 0.05, 0.0078, **{"solve_time[s]": 1.0}),
+                mesh_row("b", 864, 0.44856, 0.459, 0.03, 0.0070, **{"solve_time[s]": 9.0}),
+                mesh_row("c", 3344, 0.46088, 0.4595, 0.01, 0.0069, **{"solve_time[s]": 99.0})]
         rows = postprocess.convergence_table(rows)
         postprocess.write_convergence(rows, str(folder / "conv.csv"), str(folder / "conv.png"),
                                       str(folder / "summary.csv"))
         table = (folder / "conv.csv").read_text().strip().split("\n")
-        self.assertIn("solve_time[s]", table[0])
+        header = table[0].split(",")
+        self.assertEqual(header[:6], ["mesh", "n_panels", "CL_surface", "CL_trefftz", "CD_surface", "CD_trefftz"])
+        self.assertIn("CD_trefftz_change[%]", header)
+        self.assertIn("solve_time[s]", header)
+        self.assertNotIn("KJ", table[0])
         self.assertEqual(len(table), 4)
         summary = (folder / "summary.csv").read_text().strip().split("\n")
         self.assertEqual(summary[0].split(",")[:2], ["quantity", "meshes"])
-        self.assertEqual(len(summary), 4)
-        self.assertTrue(summary[1].startswith("CL,"))
+        self.assertEqual(len(summary), 5)
+        self.assertTrue(summary[1].startswith("CL_surface,"))
         self.assertIn("monotonic", summary[1])
+        self.assertTrue(summary[4].startswith("CD_trefftz,"))
         self.assertTrue((folder / "conv.png").exists())
+
+    def test_plot_skips_extrapolations_with_order_below_one_half(self):
+        # p = 0.18 gave CD_surface extrapolated to -0.0246 on the uniform wing: not drawn.
+        # oscillating/diverging results (p None) are not drawn either; p = 0.5 and above are
+        summary = [{"quantity": "CL_surface", "p": 0.81, "extrapolated": 0.465},
+                   {"quantity": "CL_trefftz", "p": None, "extrapolated": None},
+                   {"quantity": "CD_surface", "p": 0.18, "extrapolated": -0.0246},
+                   {"quantity": "CD_trefftz", "p": 0.5, "extrapolated": 0.0074}]
+        drawn = postprocess.plotted_extrapolations(summary)
+        self.assertEqual([s["quantity"] for s in drawn], ["CL_surface", "CD_trefftz"])
+        self.assertEqual(postprocess.MIN_ORDER_TO_PLOT, 0.5)
+
+    def test_rows_from_a_case_table_rebuild_the_convergence_files(self):
+        # all_cases.csv from the wing-family runs: one family per row, KJ column names from the solver
+        folder = Path(tempfile.mkdtemp())
+        cases = folder / "all_cases.csv"
+        cases.write_text("family,mesh,n_panels,CL,CL_KJ,CD_press,CD_KJ,Cm_y,solve_time[s]\n"
+                         "clustered,w1.stl,224,0.4267,0.4684,0.0238,0.0078,-0.11,0.05\n"
+                         "clustered,w2.stl,728,0.4534,0.4692,0.0130,0.0068,-0.12,0.33\n"
+                         "uniform,w1.stl,224,0.4025,0.4744,0.0406,0.0064,-0.11,0.04\n")
+        families = postprocess.rows_from_case_table(str(cases))
+        self.assertEqual(sorted(families), ["clustered", "uniform"])
+        self.assertEqual(len(families["clustered"]), 2)
+        self.assertEqual(families["clustered"][1], {"mesh": "w2.stl", "n_panels": 728, "CL_surface": 0.4534,
+                                                    "CL_trefftz": 0.4692, "CD_surface": 0.0130,
+                                                    "CD_trefftz": 0.0068, "solve_time[s]": 0.33})
 
 
 if __name__ == "__main__":

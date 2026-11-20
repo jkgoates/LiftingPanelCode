@@ -23,7 +23,7 @@ from mesh import Mesh
 from solver import Solver
 import postprocess
 
-# every file goes under this folder (run_cases_vectorized.py changes it to output/vectorized)
+# every file goes under this folder
 OUTPUT_FOLDER = "output"
 
 
@@ -63,15 +63,13 @@ def run_one_mesh(name, base):
     postprocess.export_solution(data, solver, solution)
     total_time = time.time() - start
 
-    row = {"mesh": os.path.basename(mesh_file),
-           "n_panels": int(mesh.N),
-           "CL": float(solver.forces["CL"]),
-           "CL_KJ": float(solver.CL_KJ),
-           "CD_press": float(solver.forces["CD_press"]),
-           "solve_time[s]": solve_time}
-    print("{0}: {1} panels, CL = {2:.5f}, CL_KJ = {3:.5f}, CD_press = {4:.5f}, solve {5:.0f} s, "
-          "exports {6:.0f} s".format(name, row["n_panels"], row["CL"], row["CL_KJ"], row["CD_press"], solve_time,
-                                     total_time - solve_time), flush=True)
+    row = {"mesh": os.path.basename(mesh_file), "n_panels": int(mesh.N)}
+    row.update(postprocess.coefficient_row(solver))
+    row["solve_time[s]"] = solve_time
+    print("{0}: {1} panels, CL surface/Trefftz = {2:.5f}/{3:.5f}, CD surface/Trefftz = {4:.5f}/{5:.5f}, "
+          "solve {6:.0f} s, exports {7:.0f} s".format(name, row["n_panels"], row["CL_surface"], row["CL_trefftz"],
+                                                     row["CD_surface"], row["CD_trefftz"], solve_time,
+                                                     total_time - solve_time), flush=True)
     return row
 
 
