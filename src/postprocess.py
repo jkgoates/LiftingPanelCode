@@ -126,7 +126,12 @@ def write_wake_vtk(path, solver, solution, length):
         points.append(p2 + length * solver.u_inf)
         points.append(p2)
         cells.append([4 * s, 4 * s + 1, 4 * s + 2, 4 * s + 3])
-    write_vtk(path, points, cells, {"gamma_wake": solution["gamma_wake"]}, {}, "wake")
+    # gamma_wake is the bound circulation (largest at the root); gamma_shed = -dGamma/dy is the strength of the
+    # trailing vortices (about 0 at the root, largest at the tips)
+    scalars = {"gamma_wake": solution["gamma_wake"]}
+    if solution.get("gamma_shed") is not None:
+        scalars["gamma_shed"] = solution["gamma_shed"]
+    write_vtk(path, points, cells, scalars, {}, "wake")
 
 
 # ---------- off-body velocities ----------
